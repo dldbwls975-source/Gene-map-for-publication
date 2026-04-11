@@ -1,508 +1,704 @@
 import streamlit as st
 import pandas as pd
-import re
-from Bio import SeqIO, Restriction
-from io import StringIO, BytesIO
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
+from Bio.SeqFeature import SeqFeature, FeatureLocation
+from Bio.Restriction import RestrictionBatch
+import os
+from io import BytesIO, StringIO
+import zipfile
+from datetime import datetime
+from docx import Document
 
-st.set_page_config(layout="wide", page_title="논문 피규어 스튜디오")
-st.title("🧬 논문 피규어용 유전자 맵 스튜디오")
+st.set_page_config(page_title="Crypto Designer", page_icon="🧪", layout="wide")
+st.title("🧪 Crypto Allele Designer")
 
-with st.expander("🔒 데이터 보안 및 면책 조항 (사용 전 필독)", expanded=False):
-    st.markdown("""
-**📁 데이터 처리 방식**
-본 프로그램은 사용자의 데이터를 수집하거나 외부 서버에 저장하지 않습니다.
-업로드된 GenBank 파일은 브라우저 세션이 유지되는 동안 **서버 메모리에서만** 처리되며,
-페이지 새로고침·탭 종료 시 즉시 파기됩니다. 미발표 서열, 특허 출원 전 데이터,
-환자 유래 민감 정보 등도 안심하고 사용하실 수 있습니다.
+# ── 파일 체크 ──────────────────────────────────────────────────────────────────
+if not os.path.exists("genome.fasta") or not os.path.exists("annotation.gff"):
+    st.error("❌ 'genome.fasta' 및 'annotation.gff' 파일이 필요합니다. 작업 폴더에 두 파일이 있는지 확인해 주세요.")
+    st.stop()
 
-**⚠️ 면책 조항 (Disclaimer)**
-본 소프트웨어는 **'있는 그대로(As-is)'** 제공되며, 어떠한 형태의 명시적·묵시적 보증도 하지 않습니다.
-프로그램은 좌표 변환, 자동 분류 등의 과정에서 예기치 않은 오류를 포함할 수 있으며,
-**생성된 피규어의 좌표·라벨·결과물에 대한 최종 검증 책임은 전적으로 사용자 본인에게 있습니다.**
-논문 투고 전 반드시 원본 GenBank 파일과 대조하여 정확성을 확인해 주세요.
 
-**📜 License & Author / 라이선스 및 제작**
-This software was developed by **YJ LEE (Yujin Lee)** and is released
-for **NONCOMMERCIAL ACADEMIC USE ONLY** (PolyForm Noncommercial 1.0.0
-based). Academic, educational, and nonprofit research use is freely
-permitted. Any commercial use is strictly prohibited without prior
-written permission from the author.
+# ── 캐시된 파일 로딩 ────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_genome():
+    return SeqIO.to_dict(SeqIO.parse("genome.fasta", "fasta"))
 
-본 소프트웨어는 **YJ LEE (Yujin Lee)** 가 제작하였으며,
-**비영리 학술 사용 전용** (PolyForm Noncommercial 1.0.0 기반)으로
-배포됩니다. 학술·교육·비영리 연구 목적의 사용은 자유롭게 허용되나,
-상업적 사용은 저작자의 사전 서면 허가 없이 엄격히 금지됩니다.
-상업적 사용을 원하시는 경우 저작자에게 별도 문의 바랍니다.
+@st.cache_resource
+def load_gff():
+    with open("annotation.gff", "r") as f:
+        return f.readlines()
+
+
+# ── Word 매뉴얼 생성 ────────────────────────────────────────────────────────────
+def generate_manual_word():
+    doc = Document()
+    doc.add_heading('Crypto Allele Designer 사용 매뉴얼', 0)
+
+    doc.add_heading('1. 주의사항 (Notice)', level=1)
+    doc.add_paragraph('• 교차 점검 필수: 본 도구는 연구 편의를 돕는 자동화 스크립트입니다. 출력된 최종 Allele(.gb) 서열과 프라이머 결합 위치는 실험 진행 전, SnapGene 등 시퀀스 뷰어 프로그램을 통해 반드시 직접 교차 점검(Cross-check)하시기 바랍니다.')
+    doc.add_paragraph('• 이용 범위: 본 도구는 학술적 연구 목적으로만 자유롭게 이용 가능하며, 상업적 이용은 엄격히 금지됩니다.')
+
+    doc.add_heading('2. 기본 파일 설정', level=1)
+    doc.add_paragraph('프로그램 실행 경로 내에 다음 두 파일이 반드시 존재해야 정상 작동합니다.')
+    doc.add_paragraph('1) genome.fasta : Reference Genome 전체 서열\n2) annotation.gff : 유전자 위치(CDS 등)를 포함한 Annotation 파일')
+    doc.add_paragraph('결과물은 ZIP 파일로 다운로드되며, [GB → DNA 변환] 탭을 이용하면 생성된 .gb 파일을 SnapGene에서 열람하기 편한 .dna 파일로 일괄 변환할 수 있습니다.')
+
+    doc.add_heading('3. Excel 일괄(Batch) 양식 작성법', level=1)
+    doc.add_paragraph('사이드바에서 다운로드한 엑셀 양식을 활용하여 다수의 유전자를 한 번에 디자인할 수 있습니다.')
+    doc.add_paragraph('[Primers 시트]\n설계할 모든 프라이머의 Gene ID, Primer Name, Sequence를 입력합니다.')
+    doc.add_paragraph('[Probes_WT / Probes_MUT 시트]\nWT 및 Mutant 서열에서 Southern blot 등에 사용할 Probe 구간의 양 끝 프라이머 이름을 기입합니다. (프라이머의 Overlap 서열은 제외되고 실제 주형과 결합하는 구간만 Probe로 표시됩니다.)')
+    doc.add_paragraph('[Enzymes 시트]\n지도에 표기할 제한효소가 있다면 쉼표(,)로 구분하여 기입합니다. (예: BamHI, EcoRV)')
+    doc.add_paragraph('[Jobs 시트]\n디자인의 주요 실행 옵션을 설정하는 시트입니다.\n- Output Mode: wt (WT만), mut (Mutant만), both (둘 다 출력)\n- Insert Mode: insert (단순 삽입), replace (특정 구간 치환). Replace 모드 선택 시, 치환되어 삭제되는 구간에 포함된 Exon 영역도 자동으로 계산되어 제거됩니다.\n- Primer A Overlap: WT 서열이 아닌 삽입 마커 서열 쪽에 결합하는 프라이머의 5\' Overlap 서열을 기입합니다.\n- 삽입 마커: 업로드한 마커 GB 파일(예: NAT.gb) 내의 주석(Feature) 정보는 Mutant 서열 생성 시 기존 위치와 이름이 보존되어 자동 이식됩니다.')
+
+    output = BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
+# ── 엑셀 양식 생성 ────────────────────────────────────────────────────────────
+def generate_template():
+    output = BytesIO()
+    df_p = pd.DataFrame({
+        'Gene ID': ['CNAG_03701', 'CNAG_03701'],
+        'Primer Name': ['L1', 'L2'],
+        'Sequence': ['GCTTGTTGGCTTTCAGATG', 'CACTCGAATCCTGCATGCGTTGCCTTTTCTGTCGCC'],
+    })
+    df_pb_wt = pd.DataFrame({
+        'Gene ID': ['CNAG_03701'],
+        'Probe Start Primer': ['L1'],
+        'Probe End Primer': ['L2'],
+    })
+    df_pb_mut = pd.DataFrame({
+        'Gene ID': ['CNAG_03701'],
+        'Probe Start Primer': ['NAT_F'],
+        'Probe End Primer': ['NAT_R'],
+    })
+    df_e = pd.DataFrame({
+        'Gene ID': ['CNAG_03701'],
+        'Enzymes': ['ClaI'],
+    })
+    df_jobs = pd.DataFrame({
+        'Gene ID':            ['CNAG_03701'],
+        'Output Mode':        ['both'],        
+        'Insert Mode':        ['replace'],      
+        'Primer A':           ['L2'],
+        'Primer A Overlap':   ['CACTCGAATCCTGCATGC'],  
+        'Primer B':           ['R1'],            
+        'Primer B Overlap':   [''],
+        'Insert GB Filename': ['PCTR4_NAT.gb'],
+        'Output Filename':    ['CNAG_03701_NAT'],  
+    })
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_p.to_excel(writer,      index=False, sheet_name='Primers')
+        df_pb_wt.to_excel(writer,  index=False, sheet_name='Probes_WT')
+        df_pb_mut.to_excel(writer, index=False, sheet_name='Probes_MUT')
+        df_e.to_excel(writer,      index=False, sheet_name='Enzymes')
+        df_jobs.to_excel(writer,   index=False, sheet_name='Jobs')
+    return output.getvalue()
+
+
+# ── 사이드바 ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Settings")
+    flank_size = st.number_input("Flanking Region (bp)", value=5000, step=500)
+
+    st.divider()
+    st.subheader("📐 Topology")
+    topology = st.radio(
+        "Linear / Circular", options=["linear", "circular"], index=0,
+        help="모든 출력 파일에 일괄 적용됩니다."
+    )
+
+    st.divider()
+    st.subheader("🗂️ ZIP 구조")
+    zip_structure = st.radio(
+        "파일 정리 방식",
+        options=["flat", "by_gene"],
+        format_func=lambda x: (
+            "📄 폴더 없이 전체 압축" if x == "flat"
+            else "📁 유전자별 폴더로 정리"
+        ),
+        index=0,
+        help="by_gene: 동일한 유전자의 WT 및 MUT 파일을 하나의 폴더로 묶어 압축합니다."
+    )
+
+    st.divider()
+    st.subheader("📥 다운로드 센터")
+    st.download_button("📂 엑셀 양식 다운로드", generate_template(), "Allele_Template.xlsx")
+    st.download_button("📘 사용 매뉴얼 (Word)", generate_manual_word(), "Crypto_Allele_Designer_Manual.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
+# ── 탭 구성 ─────────────────────────────────────────────────────────────────────
+tab_main, tab_conv = st.tabs(["🧬 Allele Designer", "🔄 GB → DNA 변환"])
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 공통 분석 함수
+# ════════════════════════════════════════════════════════════════════════════════
+
+def get_primer_coords(sub_seq, p_list):
+    p_idx = {}
+    for p in p_list:
+        full_seq = str(p['seq']).strip().replace(" ", "").upper()
+        if not full_seq: continue
+        overlap = str(p.get('overlap', '')).strip().replace(" ", "").upper()
+
+        core_seq = full_seq[len(overlap):] if (overlap and full_seq.startswith(overlap)) else full_seq
+        if not core_seq: continue
+
+        core_start, core_end, strand = -1, -1, 1
+        target_fwd = Seq(core_seq)
+        idx_fwd = sub_seq.find(target_fwd)
+        if idx_fwd != -1:
+            core_start = idx_fwd; core_end = idx_fwd + len(core_seq); strand = 1
+        else:
+            target_rev = target_fwd.reverse_complement()
+            idx_rev = sub_seq.find(target_rev)
+            if idx_rev != -1:
+                core_start = idx_rev; core_end = idx_rev + len(core_seq); strand = -1
+
+        if core_start == -1: continue 
+
+        full_start, full_end = core_start, core_end 
+        target_full_fwd = Seq(full_seq)
+        idx_full_fwd = sub_seq.find(target_full_fwd)
+        if idx_full_fwd != -1:
+            full_start = idx_full_fwd; full_end = idx_full_fwd + len(full_seq)
+        else:
+            target_full_rev = target_full_fwd.reverse_complement()
+            idx_full_rev = sub_seq.find(target_full_rev)
+            if idx_full_rev != -1:
+                full_start = idx_full_rev; full_end = idx_full_rev + len(full_seq)
+
+        p_idx[p['name']] = {
+            'full_start': full_start, 'full_end': full_end,
+            'core_start': core_start, 'core_end': core_end,
+            'strand': strand
+        }
+    return p_idx
+
+
+def get_wt_base(gene_id, flank):
+    clean_id = gene_id.strip()
+    start_pos, end_pos, chrom, strand = None, None, None, 1
+    cds_raw = []
+    lines = load_gff(); genome_dict = load_genome()
+
+    for line in lines:
+        if line.startswith("#") or not line.strip(): continue
+        parts = line.split("\t")
+        if len(parts) < 9: continue
+        if parts[2] not in ("gene", "protein_coding_gene"): continue
+        attr = parts[8]
+        if f"ID={clean_id};" in attr or attr.strip().endswith(f"ID={clean_id}"):
+            chrom = parts[0]; start_pos = int(parts[3]); end_pos = int(parts[4])
+            strand = 1 if parts[6] == "+" else -1; break
+
+    if not chrom: return None, f"GFF 파일에서 Gene ID '{clean_id}'를 찾을 수 없습니다."
+
+    for line in lines:
+        if line.startswith("#") or not line.strip(): continue
+        parts = line.split("\t")
+        if len(parts) < 9: continue
+        if parts[0] == chrom and parts[2] == "CDS":
+            attr = parts[8]
+            if f"gene_id={clean_id};" in attr or f"gene_id={clean_id}" in attr:
+                cds_raw.append((int(parts[3]), int(parts[4])))
+
+    if chrom not in genome_dict: return None, f"FASTA 파일에서 Chromosome '{chrom}'을 찾을 수 없습니다."
+    full_seq = genome_dict[chrom].seq
+    ext_s = max(1, start_pos - flank); ext_e = min(len(full_seq), end_pos + flank)
+    sub_seq = full_seq[ext_s - 1: ext_e]
+    
+    if strand == -1: sub_seq = sub_seq.reverse_complement()
+
+    cds_mapped = []
+    for (s, e) in cds_raw:
+        s0 = s - ext_s if strand == 1 else ext_e - e
+        e0 = e - ext_s + 1 if strand == 1 else ext_e - s + 1
+        cds_mapped.append((s0, e0))
+        
+    cds_mapped = sorted(list(set(cds_mapped)), key=lambda x: x[0])
+
+    return {'sub_seq': sub_seq, 'cds_mapped': cds_mapped, 'gene_id': clean_id}, None
+
+
+def apply_topology(record, topo):
+    record.annotations["topology"] = topo; return record
+
+
+def add_restriction_sites(record, seq, enz_names, gene_id=""):
+    if not enz_names or str(enz_names).lower() == 'nan': return
+    clean_enz = [e.strip() for e in str(enz_names).split(',') if e.strip()]
+    if not clean_enz: return
+    try:
+        rb = RestrictionBatch(clean_enz)
+        for enz, sites in rb.search(seq).items():
+            for s in sites:
+                record.features.append(SeqFeature(
+                    FeatureLocation(s - 1, s, strand=1), type="misc_feature",
+                    qualifiers={"note": [str(enz)], "label": [str(enz)]}))
+    except Exception as e:
+        st.warning(f"⚠️ 제한효소 인식 오류 ({gene_id}): {e}")
+
+
+def add_primers_and_probes(record, seq, p_list, pb_list):
+    p_idx = get_primer_coords(seq, p_list)
+    not_found = [p['name'] for p in p_list if p['name'] and p['seq'] and p['name'] not in p_idx]
+    if not_found:
+        st.warning(f"⚠️ 서열 내에서 위치를 찾을 수 없는 프라이머: {', '.join(not_found)}")
+        
+    for pname, pinfo in p_idx.items():
+        record.features.append(SeqFeature(
+            FeatureLocation(pinfo['full_start'], pinfo['full_end'], strand=pinfo['strand']),
+            type="primer_bind", qualifiers={"note": [pname], "label": [pname]}))
+            
+    for pb in pb_list:
+        p1, p2 = pb['p1'], pb['p2']
+        if p1 in p_idx and p2 in p_idx:
+            coords = [p_idx[p1]['core_start'], p_idx[p1]['core_end'],
+                      p_idx[p2]['core_start'], p_idx[p2]['core_end']]
+            record.features.append(SeqFeature(
+                FeatureLocation(min(coords), max(coords), strand=1),
+                type="misc_feature", qualifiers={"note": ["Probe"], "label": ["Probe"]}))
+
+
+def process_wt(gene_id, p_list, pb_list, enz_names, flank, topo):
+    try:
+        base, err = get_wt_base(gene_id, flank)
+        if err: return None, err
+        sub_seq = base['sub_seq']
+        record = SeqRecord(sub_seq, id=gene_id, name=f"{gene_id}_WT",
+                           annotations={"molecule_type": "DNA"})
+        apply_topology(record, topo)
+        
+        for i, (s0, e0) in enumerate(base['cds_mapped'], 1):
+            record.features.append(SeqFeature(FeatureLocation(s0, e0, strand=1), type="CDS",
+                                              qualifiers={"note": [f"E{i}"], "label": [f"E{i}"]}))
+                                              
+        add_restriction_sites(record, sub_seq, enz_names, gene_id)
+        add_primers_and_probes(record, sub_seq, p_list, pb_list)
+        return record, None
+    except Exception as e:
+        return None, f"WT 서열 생성 오류: {e}"
+
+
+def process_mutant(gene_id, p_list, pb_list, enz_names, flank,
+                   ins_rec, insert_mode,
+                   primer_a_name, primer_b_name, topo):
+    try:
+        base, err = get_wt_base(gene_id, flank)
+        if err: return None, err
+        sub_seq = base['sub_seq']
+        ins_seq = ins_rec.seq if ins_rec else Seq("")
+
+        def find_cut_point(primer_name, mode="end"):
+            primer_entry = next((p for p in p_list if p['name'] == primer_name), None)
+            if not primer_entry or not primer_entry['seq'].strip():
+                return None, f"프라이머 '{primer_name}'의 서열 정보가 누락되었습니다."
+            full_seq_str = primer_entry['seq'].strip().upper().replace(" ", "")
+            overlap_str  = str(primer_entry.get('overlap', '')).strip().upper().replace(" ", "")
+            if overlap_str and full_seq_str.startswith(overlap_str):
+                search_seq = full_seq_str[len(overlap_str):]
+                if not search_seq:
+                    return None, f"'{primer_name}': Overlap 서열 제거 후 결합할 핵심(Core) 서열이 없습니다."
+            elif overlap_str:
+                st.warning(f"⚠️ {primer_name}: Overlap 서열이 프라이머의 5' 말단과 일치하지 않아 전체 서열 기준으로 검색합니다.")
+                search_seq = full_seq_str
+            else:
+                search_seq = full_seq_str
+            
+            target = Seq(search_seq)
+            idx = sub_seq.find(target)
+            if idx != -1:
+                return (idx if mode == "start" else idx + len(search_seq)), None
+            idx = sub_seq.find(target.reverse_complement())
+            if idx != -1:
+                return (idx if mode == "start" else idx + len(search_seq)), None
+            return None, f"WT 서열 내에서 '{primer_name}'의 결합 위치({search_seq[:20]}...)를 찾을 수 없습니다."
+
+        cut_start, err_a = find_cut_point(primer_a_name, mode="end")
+        if err_a: return None, err_a
+
+        if insert_mode == "replace":
+            if not primer_b_name: return None, "Replace 모드에서는 Primer B 지정이 필수입니다."
+            cut_end, err_b = find_cut_point(primer_b_name, mode="start")
+            if err_b: return None, err_b
+            if cut_start >= cut_end:
+                return None, f"Primer A의 끝({cut_start}) 위치가 Primer B의 시작({cut_end}) 위치보다 같거나 뒤에 있습니다."
+            mut_seq = sub_seq[:cut_start] + ins_seq + sub_seq[cut_end:]
+            ins_start_in_mut = cut_start
+            ins_delta = len(ins_seq) - (cut_end - cut_start)
+        else:
+            cut_end = cut_start 
+            mut_seq = sub_seq[:cut_start] + ins_seq + sub_seq[cut_start:]
+            ins_start_in_mut = cut_start
+            ins_delta = len(ins_seq)
+
+        shifted_cds = []
+        # WT 기준의 원래 인덱스(i)를 함께 저장
+        for i, (s0, e0) in enumerate(base['cds_mapped'], 1):
+            if e0 <= cut_start:
+                shifted_cds.append((s0, e0, i))
+            elif s0 >= cut_end:
+                shifted_cds.append((s0 + ins_delta, e0 + ins_delta, i))
+            else:
+                if s0 < cut_start:
+                    shifted_cds.append((s0, cut_start, i))
+                if e0 > cut_end:
+                    shifted_cds.append((cut_end + ins_delta, e0 + ins_delta, i))
+
+        record = SeqRecord(mut_seq, id=gene_id, name=f"{gene_id}_MUT",
+                           annotations={"molecule_type": "DNA"})
+        apply_topology(record, topo)
+
+        # 렌더링 시 오리지널 인덱스(orig_idx)를 그대로 사용하여 번호 유지
+        for (s0, e0, orig_idx) in shifted_cds:
+            record.features.append(SeqFeature(FeatureLocation(s0, e0, strand=1), type="CDS",
+                                              qualifiers={"note": [f"E{orig_idx}"], "label": [f"E{orig_idx}"]}))
+
+        if ins_rec:
+            for feat in ins_rec.features:
+                if feat.type == "source":
+                    continue
+                
+                new_start = feat.location.start + ins_start_in_mut
+                new_end = feat.location.end + ins_start_in_mut
+                new_loc = FeatureLocation(new_start, new_end, strand=feat.location.strand)
+                
+                new_feat = SeqFeature(new_loc, type=feat.type, qualifiers=feat.qualifiers)
+                record.features.append(new_feat)
+
+        add_restriction_sites(record, mut_seq, enz_names, gene_id)
+        add_primers_and_probes(record, mut_seq, p_list, pb_list)
+        return record, None
+    except Exception as e:
+        return None, f"Mutant 서열 생성 오류: {e}"
+
+
+def write_records_to_zip(zf, jobs, flank, topo, zip_structure="flat"):
+    success, errors = 0, []
+    total = len(jobs)
+    progress = st.progress(0, text="파일 생성 처리 중...")
+
+    for i, j in enumerate(jobs):
+        progress.progress((i + 1) / total, text=f"작업 진행 중: {j['id']}")
+        out_mode  = j.get('out_mode', 'wt')
+        
+        # 사용자가 입력한 파일명 (입력 안 했으면 기본 유전자 ID)
+        custom_name = j.get('out_name', j['id'])
+
+        prefix = f"{j['id']}/" if zip_structure == "by_gene" else ""
+
+        # WT는 무조건 [Gene ID] WT allele 로 고정
+        wt_fname  = f"{prefix}{j['id']} WT allele"
+        
+        # Mutant는 사용자가 지정한 이름 그대로 사용 (자동 MUT allele 꼬리표 없음)
+        mut_fname = f"{prefix}{custom_name}"
+
+        if out_mode in ('wt', 'both'):
+            wt_res, wt_err = process_wt(
+                j['id'], j['p_list'], j['pb_list_wt'], j['enz'], flank, topo)
+            if wt_res:
+                buf = StringIO(); SeqIO.write(wt_res, buf, "genbank")
+                zf.writestr(f"{wt_fname}.gb", buf.getvalue())
+                success += 1
+            else:
+                errors.append(f"❌ {j['id']} WT 작업 실패: {wt_err}")
+
+        if out_mode in ('mut', 'both'):
+            mut_res, mut_err = process_mutant(
+                j['id'], j['p_list'], j['pb_list_mut'], j['enz'], flank,
+                j['ins_rec'], j['mode'],
+                j['pa'], j['pb'], topo)
+            if mut_res:
+                buf = StringIO(); SeqIO.write(mut_res, buf, "genbank")
+                zf.writestr(f"{mut_fname}.gb", buf.getvalue())
+                success += 1
+            else:
+                errors.append(f"❌ {j['id']} MUT 작업 실패: {mut_err}")
+
+    progress.empty()
+    return success, errors
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# ALLELE DESIGNER TAB
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_main:
+    st.header("🧬 Allele Designer")
+    
+    st.warning("""
+    **⚠️ 사용 전 필수 안내**
+    - **교차 점검 필수:** 본 도구는 연구 편의를 돕는 자동화 유틸리티입니다. 최종 생성된 시퀀스 파일 및 프라이머 결합 위치는 실험 전 반드시 **SnapGene 등의 시퀀스 뷰어를 통해 직접 교차 점검(Cross-check)** 해 주시기 바랍니다.
+    - **이용 범위:** 본 도구는 **학술적 연구 목적**으로만 자유롭게 이용 가능하며, 상업적 이용은 금지됩니다.
     """)
 
-# ============================================================
-# 🎛️ 사이드바 — 기능별 Expander 그룹화
-# ============================================================
-# --- 프리셋 기본값 정의 (저장/복원 대상) ---
-import json
-PRESET_DEFAULTS = {
-    "label_offset_x": 150, "text_color": "#000000",
-    "label_font_size": 14, "marker_font_size": 14,
-    "enzyme_font_size": 14, "primer_font_size": 14,
-    "color_exon": "#002060", "color_marker": "#FFC000",
-    "color_enzyme": "#FF0000", "color_promoter": "#AAAAAA",
-    "color_probe": "#92D050", "color_line": "#000000",
-    "box_h": 0.05, "probe_h": 0.05, "enzyme_line_len": 0.05,
-    "primer_offset_base": 0.07, "line_width": 2.5,
-    "fig_width": 16, "fig_height": 5, "dpi_setting": 300,
-    "zoom_x": 1.0,
-    "trim_left": 0, "trim_right": 0,
-    "show_scalebar": True, "scalebar_bp": 1000,
-    "scalebar_color": "#000000", "scalebar_lw": 2.5,
-    "show_hr": True,
-}
-# session_state 초기화 (최초 1회)
-for k, v in PRESET_DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+    st.info("사이드바에서 통합 디자인 양식과 매뉴얼을 다운로드할 수 있습니다. 결과물은 WT, Mutant, 또는 둘 다 출력하도록 선택 가능합니다.")
 
-with st.sidebar:
-    st.header("⚙️ 컨트롤 패널")
+    input_mode = st.radio("입력 방식", ["🖱️ 개별 수동 입력", "📂 엑셀 일괄 업로드"],
+                          horizontal=True, key="input_mode")
+    st.divider()
 
-    # ==========================================
-    # [추가된 코드] 가이드 파일 다운로드 버튼
-    # ==========================================
-    with st.expander("ℹ️ 사용 가이드 다운로드", expanded=False):
-        st.caption("유전자 맵 스튜디오의 상세 사용법과 꿀팁을 확인하세요.")
-        try:
-            # 워드 파일 읽기
-            with open("🧬 논문 피규어용 유전자 맵 스튜디오 사용 가이드.docx", "rb") as guide_file:
-                st.download_button(
-                    label="📄 가이드 다운로드 (.docx)",
-                    data=guide_file,
-                    file_name="논문_피규어_유전자맵_스튜디오_사용가이드.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True
+    if input_mode == "🖱️ 개별 수동 입력":
+
+        col_l, col_r = st.columns(2)
+
+        with col_l:
+            st.subheader("① 기본 정보")
+            gene_id_m = st.text_input("Gene ID", placeholder="예: CNAG_03701", key="m_gene").strip()
+            enz_m     = st.text_input("제한효소 (쉼표 구분)", placeholder="EcoRV, BamHI", key="m_enz")
+
+            st.subheader("② 프라이머")
+            if 'm_primers' not in st.session_state: st.session_state.m_primers = []
+            if st.button("프라이머 추가", key="m_add_p"):
+                st.session_state.m_primers.append({"name": f"P{len(st.session_state.m_primers)+1}", "seq": ""})
+            for i, p in enumerate(st.session_state.m_primers):
+                with st.expander(f"Primer: {p['name']}", expanded=True):
+                    p['name']    = st.text_input("이름",   value=p['name'], key=f"m_pn_{i}").strip()
+                    p['seq']     = st.text_input("서열",   value=p['seq'],  key=f"m_ps_{i}")
+                    p['overlap'] = st.text_input(
+                        "Overlap (5' 마커 결합 서열, 없으면 공란)",
+                        value=p.get('overlap', ''), key=f"m_pov_{i}",
+                        placeholder="예: CACTCGAATCCTGCATGC"
+                    ).strip()
+            if st.button("프라이머 초기화", key="m_rst_p"):
+                st.session_state.m_primers = []; st.rerun()
+
+            st.subheader("③-1. Southern Probe (WT)")
+            if 'm_probes_wt' not in st.session_state: st.session_state.m_probes_wt = []
+            if st.button("WT Probe 추가", key="m_add_pb_wt"):
+                st.session_state.m_probes_wt.append({"p1": "", "p2": ""})
+            for i, pb in enumerate(st.session_state.m_probes_wt):
+                c1, c2 = st.columns(2)
+                with c1: pb['p1'] = st.text_input("시작 프라이머", value=pb['p1'], key=f"m_pb1_wt_{i}").strip()
+                with c2: pb['p2'] = st.text_input("끝 프라이머",   value=pb['p2'], key=f"m_pb2_wt_{i}").strip()
+            if st.button("WT Probe 초기화", key="m_rst_pb_wt"):
+                st.session_state.m_probes_wt = []; st.rerun()
+
+            st.subheader("③-2. Southern Probe (MUT)")
+            if 'm_probes_mut' not in st.session_state: st.session_state.m_probes_mut = []
+            if st.button("MUT Probe 추가", key="m_add_pb_mut"):
+                st.session_state.m_probes_mut.append({"p1": "", "p2": ""})
+            for i, pb in enumerate(st.session_state.m_probes_mut):
+                c1, c2 = st.columns(2)
+                with c1: pb['p1'] = st.text_input("시작 프라이머", value=pb['p1'], key=f"m_pb1_mut_{i}").strip()
+                with c2: pb['p2'] = st.text_input("끝 프라이머",   value=pb['p2'], key=f"m_pb2_mut_{i}").strip()
+            if st.button("MUT Probe 초기화", key="m_rst_pb_mut"):
+                st.session_state.m_probes_mut = []; st.rerun()
+
+        with col_r:
+            st.subheader("④ 출력 모드")
+            out_mode_m = st.radio(
+                "출력 대상",
+                options=["wt", "mut", "both"],
+                format_func=lambda x: {"wt": "WT 서열만", "mut": "Mutant 서열만", "both": "WT + Mutant 모두"}[x],
+                key="m_out_mode", horizontal=True
+            )
+            out_name_m = st.text_input(
+                "Mutant 출력 파일명 (WT는 'Gene ID WT allele'로 고정됨)",
+                key="m_out_name", placeholder="예: CNAG_03701_NAT"
+            ).strip()
+
+            if out_mode_m in ("mut", "both"):
+                st.subheader("⑤ 삽입 방식 설정")
+                ins_mode_m = st.radio(
+                    "삽입 형태",
+                    options=["insert", "replace"],
+                    format_func=lambda x: (
+                        "➕ Insert — Primer A 3' 말단 직후 삽입" if x == "insert"
+                        else "🔄 Replace — Primer A 3' 말단부터 Primer B 5' 시작 구간 치환"),
+                    key="m_ins_mode"
                 )
-        except FileNotFoundError:
-            st.error("⚠️ 가이드 파일이 서버에 없습니다.")
-    # ==========================================
+                pnames = [p['name'] for p in st.session_state.m_primers if p['name']]
+                c1, c2 = st.columns(2)
+                with c1:
+                    pa_m    = st.selectbox("Primer A", pnames or ["—"], key="m_pa")
+                    pa_ov_m = st.text_input("Primer A Overlap (5' 마커 결합 서열)",
+                                            key="m_pa_ov", placeholder="ATGCATGC...").strip()
+                with c2:
+                    if ins_mode_m == "replace":
+                        pb_m    = st.selectbox("Primer B", pnames or ["—"], key="m_pb")
+                        pb_ov_m = st.text_input("Primer B Overlap (5' 마커 결합 서열)",
+                                                key="m_pb_ov", placeholder="GCTAGCTA...").strip()
+                    else:
+                        pb_m = None; pb_ov_m = ""
 
-    with st.expander("💾 프리셋 (내 기본값)", expanded=True):
-        st.caption("현재 설정을 JSON으로 저장하거나, 저장한 파일을 불러와서 한 번에 복원합니다.")
+                st.subheader("⑥ 삽입 서열 (GenBank)")
+                st.info("업로드한 마커 파일 내의 주석(Feature) 정보는 자동으로 보존되어 이식됩니다.")
+                ins_gb = st.file_uploader("삽입할 .gb / .gbk 파일 업로드", type=["gb","gbk"], key="m_ins_gb")
+                ins_rec_m = None
+                if ins_gb:
+                    try:
+                        ins_rec_m = SeqIO.read(StringIO(ins_gb.read().decode("utf-8")), "genbank")
+                        _dn = ins_rec_m.name if ins_rec_m.name and ins_rec_m.name != '.' else ins_rec_m.id
+                        st.success(f"✅ {ins_rec_m.id} ({len(ins_rec_m.seq)} bp) 정상 로드")
+                    except Exception as e:
+                        st.error(f"GB 파일 판독 오류: {e}")
 
-        # Export
-        current_preset = {k: st.session_state[k] for k in PRESET_DEFAULTS}
-        st.download_button(
-            "⬇️ 현재 설정을 JSON으로 저장",
-            data=json.dumps(current_preset, indent=2, ensure_ascii=False),
-            file_name="figure_preset.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-
-        # Import
-        uploaded_preset = st.file_uploader("⬆️ 프리셋 불러오기", type=["json"], key="preset_uploader")
-        if uploaded_preset is not None:
-            sig = uploaded_preset.name + str(uploaded_preset.size)
-            if st.session_state.get("_last_preset_sig") != sig:
-                try:
-                    loaded = json.loads(uploaded_preset.getvalue().decode("utf-8"))
-                    for k, v in loaded.items():
-                        if k in PRESET_DEFAULTS:
-                            st.session_state[k] = v
-                    st.session_state["_last_preset_sig"] = sig
-                    st.success("프리셋을 적용했습니다!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"프리셋 파일을 읽지 못했습니다: {e}")
-
-        if st.button("🔄 공장 초기값으로 리셋", use_container_width=True):
-            for k, v in PRESET_DEFAULTS.items():
-                st.session_state[k] = v
-            st.session_state.pop("_last_preset_sig", None)
-            st.rerun()
-
-    with st.expander("📝 라벨 & 텍스트", expanded=True):
-        st.caption(
-            "`**굵게**` · `*기울임*` · `^위첨자^` · `~아래첨자~`\n\n"
-            "**조합 가능:** `***굵은기울임***`, `**car1^Δ^**`, `*p~TEF1~*`"
-        )
-        wt_label = st.text_input("WT 라벨", "", placeholder="예: WT")
-        mut_label = st.text_input("Mutant 라벨", "", placeholder="예: *car1*Δ")
-        label_offset_x = st.slider("라벨 X축 거리", 0, 1000, step=10, key="label_offset_x")
-        text_color = st.color_picker("텍스트 색상", key="text_color")
-
-    with st.expander("🔠 글씨 크기"):
-        label_font_size = st.slider("라벨 (WT/Mut)", 6, 24, key="label_font_size")
-        marker_font_size = st.slider("Marker", 6, 20, key="marker_font_size")
-        enzyme_font_size = st.slider("Enzyme", 6, 20, key="enzyme_font_size")
-        primer_font_size = st.slider("Primer", 6, 20, key="primer_font_size")
-
-    with st.expander("🎨 색상"):
-        color_exon = st.color_picker("Exon", key="color_exon")
-        color_marker = st.color_picker("Marker", key="color_marker")
-        color_enzyme = st.color_picker("Enzyme", key="color_enzyme")
-        color_promoter = st.color_picker("Promoter", key="color_promoter")
-        color_probe = st.color_picker("Probe", key="color_probe")
-        color_line = st.color_picker("Backbone", key="color_line")
-
-    with st.expander("📏 크기 & 두께"):
-        box_h = st.slider("유전자 박스 두께", 0.01, 0.10, step=0.01, key="box_h")
-        probe_h = st.slider("Probe 두께", 0.01, 0.10, step=0.01, key="probe_h")
-        enzyme_line_len = st.slider("Enzyme 선 길이", 0.01, 0.10, step=0.01, key="enzyme_line_len")
-        primer_offset_base = st.slider("Primer 선 길이", 0.05, 0.20, step=0.01, key="primer_offset_base")
-        line_width = st.slider("Backbone 두께", 1.0, 5.0, step=0.5, key="line_width")
-
-    with st.expander("🖼️ 캔버스"):
-        st.caption(
-            "**가로 확대 배율**을 키우면 글자·박스 두께는 그대로, "
-            "유전자 영역만 옆으로 시원하게 펼쳐져 라벨 겹침이 풀립니다."
-        )
-        fig_width_base = st.slider("가로 (기본)", 5, 30, key="fig_width")
-        zoom_x = st.slider("🔍 가로 확대 배율", 1.0, 10.0, step=0.5, key="zoom_x")
-        fig_height = st.slider("세로", 3, 15, key="fig_height")
-        dpi_setting = st.select_slider("DPI", options=[150, 300, 600], key="dpi_setting")
-        # 실제 figure에 들어갈 가로 = 기본 × 배율
-        fig_width = fig_width_base * zoom_x
-
-    with st.expander("✂️ 양 끝 자르기 (WT/Mutant 동시 적용)"):
-        st.caption(
-            "주요 영역에 집중하기 위해 자동 계산된 범위에서 양쪽 끝을 추가로 잘라냅니다. "
-            "0이면 비활성. 단위는 bp."
-        )
-        trim_left = st.number_input("⬅️ 왼쪽 잘라내기 (bp)", min_value=0, step=100, key="trim_left")
-        trim_right = st.number_input("➡️ 오른쪽 잘라내기 (bp)", min_value=0, step=100, key="trim_right")
-
-    with st.expander("📏 Scale bar"):
-        show_scalebar = st.checkbox("Scale bar 표시", key="show_scalebar")
-        scalebar_bp = st.number_input("길이 (bp)", min_value=100, step=100, key="scalebar_bp")
-        scalebar_color = st.color_picker("색상", key="scalebar_color")
-        scalebar_lw = st.slider("두께", 1.0, 6.0, step=0.5, key="scalebar_lw")
-        st.caption("1000bp 이상은 자동으로 'kb' 단위로 표기됩니다.")
-
-    with st.expander("🔧 기타"):
-        show_hr = st.checkbox("HR 점선 표시", key="show_hr")
-
-    st.markdown("---")
-    st.caption(
-        "⚠️ **As-is 제공** · 결과물 검증 책임은 사용자에게 있습니다.\n\n"
-        "🔒 업로드 파일은 서버에 저장되지 않고 세션 종료 시 파기됩니다.\n\n"
-        "📜 Noncommercial Academic Use / 비영리 학술 사용"
-    )
-    st.caption("👨‍💻 Developed by Yujin Lee | 💡 버그 제보 및 기능 건의 환영!")
-
-# ============================================================
-# 텍스트 파서 (버그 수정)
-# ============================================================
-def format_text(text):
-    """
-    중첩/조합 서식 지원:
-      ***x*** → 굵은 기울임
-      **x**   → 굵게
-      *x*     → 기울임
-      ^x^     → 위첨자
-      ~x~     → 아래첨자
-    조합 예: **car1^Δ^**, *p**TEF1*** 등
-    """
-    if not text:
-        return ""
-    text = str(text)
-    if "$" in text:           # 사용자가 직접 LaTeX 입력한 경우 그대로
-        return text
-
-    original = text
-    has_markup = bool(re.search(r'\*\*\*|\*\*|\*|\^.+?\^|~.+?~', text))
-    if not has_markup:
-        return original
-
-    # 1) 안쪽부터 바깥쪽으로 재귀 변환 (가장 긴 토큰 우선)
-    #    굵은 기울임 → 굵게 → 기울임 → 위/아래 첨자
-    def convert(s):
-        prev = None
-        while prev != s:
-            prev = s
-            # ***bold italic***
-            s = re.sub(r'\*\*\*([^*]+?)\*\*\*', r'\\mathbf{\\mathit{\1}}', s)
-            # **bold**
-            s = re.sub(r'\*\*([^*]+?)\*\*', r'\\mathbf{\1}', s)
-            # *italic*  (앞뒤가 별표가 아닐 때만)
-            s = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'\\mathit{\1}', s)
-            # ^superscript^
-            s = re.sub(r'\^([^\^]+?)\^', r'^{\1}', s)
-            # ~subscript~
-            s = re.sub(r'~([^~]+?)~', r'_{\1}', s)
-        return s
-
-    converted = convert(text)
-
-    # 2) mathtext 안에서 일반 텍스트(영문/숫자/한글)도 보존되도록
-    #    LaTeX 명령부 바깥의 공백만 \ 로 이스케이프
-    #    간단히: 전체 공백 → \  (mathtext에서 안전)
-    converted = converted.replace(" ", r"\ ")
-
-    return f"${converted}$"
-
-# ============================================================
-# GenBank 파서
-# ============================================================
-@st.cache_data
-def parse_to_dataframe(file_content, is_mutant=False):
-    record = SeqIO.read(StringIO(file_content), "genbank")
-    data = []
-    try:
-        ALL_ENZYMES = {str(e).upper() for e in Restriction.AllEnzymes}
-    except Exception:
-        ALL_ENZYMES = {'ECORV','PSTI','BAMHI','ECORI','HINDIII','XHOI','NOTI','PPUMI'}
-
-    primer_keywords = {'SO','L1','L2','R1','R2','PL','PR','PO','SO2','ILP','IRP'}
-
-    for f in record.features:
-        name = ""
-        for key in ['label','note','gene','name','ApEinfo_label']:
-            if key in f.qualifiers:
-                name = str(f.qualifiers[key][0]).strip()
-                break
-        if not name:
-            continue
-
-        upper = name.upper()
-        no_space = upper.replace(" ", "")
-        start, end = int(f.location.start), int(f.location.end)
-        strand = f.location.strand if f.location.strand is not None else 1
-        ftype = f.type.lower()
-        category = "Other"
-
-        if 'PROBE' in upper:
-            name, category = "Probe", "Probe"
-        elif ftype == 'restriction_site' or upper in ALL_ENZYMES or no_space in ALL_ENZYMES:
-            category = "Enzyme"
-        elif any(m in upper for m in ['NAT','NEO','HYG','TRP1']):
-            category = "Marker"
-        elif 'PROMOTER' in upper:
-            category = "Promoter"
-        elif ftype in ['primer_bind','misc_binding'] or upper in primer_keywords or 'PRIMER' in upper:
-            category = "Primer"
-        elif ftype in ['cds','exon'] or upper.startswith('E'):
-            category = "Exon"
-
-        if category != "Other":
-            # Mutant 파일의 Enzyme은 기본적으로 위로 향하도록
-            up_default = (is_mutant and category == "Enzyme")
-            data.append({
-                "표시": upper not in ['QLP','QRP'],
-                "이름": name, "길이_배수": 1.0, "Y축_띄우기": 0.0,
-                "위로향함": up_default, "종류": category,
-                "시작": start, "종료": end, "방향": strand
-            })
-    return pd.DataFrame(data), len(record)
-
-# ============================================================
-# 메인 화면 — 탭 구조
-# ============================================================
-tab_upload, tab_edit, tab_hr, tab_view = st.tabs(
-    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드"]
-)
-
-with tab_upload:
-    c1, c2 = st.columns(2)
-    with c1:
-        wt_file = st.file_uploader("WT GenBank (.gb)", type=["gb","gbk"])
-    with c2:
-        mutant_file = st.file_uploader("Mutant GenBank (.gb)", type=["gb","gbk"])
-
-if wt_file and mutant_file:
-    wt_df_raw, wt_len = parse_to_dataframe(wt_file.getvalue().decode("utf-8"), is_mutant=False)
-    mut_df_raw, mut_len = parse_to_dataframe(mutant_file.getvalue().decode("utf-8"), is_mutant=True)
-
-    editor_config = {
-        "표시": st.column_config.CheckboxColumn("표시"),
-        "이름": st.column_config.TextColumn("📝 이름"),
-        "길이_배수": st.column_config.NumberColumn("📏 선 길이", min_value=0.1, max_value=5.0, step=0.1, format="%.1f"),
-        "Y축_띄우기": st.column_config.NumberColumn("↕️ Y 띄우기", min_value=-0.5, max_value=0.5, step=0.01, format="%.2f"),
-        "위로향함": st.column_config.CheckboxColumn("⬆️ 위로"),
-        "종류": st.column_config.TextColumn("종류", disabled=True),
-        "시작": None, "종료": None, "방향": None
-    }
-
-    with tab_edit:
-        ec1, ec2 = st.columns(2)
-        with ec1:
-            st.markdown("**WT**")
-            wt_df_edited = st.data_editor(wt_df_raw, column_config=editor_config, hide_index=True, key="wt_ed")
-        with ec2:
-            st.markdown("**Mutant**")
-            mut_df_edited = st.data_editor(mut_df_raw, column_config=editor_config, hide_index=True, key="mut_ed")
-
-    with tab_hr:
-        st.caption("편집한 '이름'을 입력하면 X자 점선으로 연결합니다.")
-        default_hr = pd.DataFrame({"WT_이름":["L1","L2","R1","R2"], "Mutant_이름":["L2","L1","R2","R1"]})
-        hr_edited = st.data_editor(default_hr, num_rows="dynamic", hide_index=True, key="hr_editor")
-
-    # ---------- 그리기 ----------
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = ['Roboto','Arial','sans-serif']
-    plt.rcParams['mathtext.default'] = 'regular'
-
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    y_wt, y_mut = 0.65, 0.35
-    z_line, z_hr, z_primer, z_box = 1, 2, 4, 10
-
-    # 표시되는 요소들의 실제 좌표 범위 자동 계산 → 빈 backbone 제거
-    all_visible = pd.concat([
-        wt_df_edited[wt_df_edited['표시']==True],
-        mut_df_edited[mut_df_edited['표시']==True]
-    ])
-    if not all_visible.empty:
-        data_start = int(all_visible['시작'].min())
-        data_end   = int(all_visible['종료'].max())
-    else:
-        data_start, data_end = 0, max(wt_len, mut_len)
-
-    # 좌우에 데이터 영역의 2%만큼 작은 패딩 추가 (최소 50bp)
-    pad = max(int((data_end - data_start) * 0.02), 50)
-    auto_start = max(0, data_start - pad)
-    auto_end   = data_end + pad
-
-    # 사용자 trim 적용 (양 끝에서 추가로 잘라냄)
-    final_start = auto_start + trim_left
-    final_end   = auto_end - trim_right
-    if final_end <= final_start:   # 너무 많이 자른 경우 안전장치
-        final_end = final_start + 100
-    span = final_end - final_start
-
-    def X(x):
-        return x
-
-    ax.plot([final_start, final_end],[y_wt,y_wt], color=color_line, lw=line_width, zorder=z_line)
-    ax.plot([final_start, final_end],[y_mut,y_mut], color=color_line, lw=line_width, zorder=z_line)
-    ax.text(final_start - label_offset_x, y_wt, format_text(wt_label), ha='right', va='center', color=text_color, fontsize=label_font_size)
-    ax.text(final_start - label_offset_x, y_mut, format_text(mut_label), ha='right', va='center', color=text_color, fontsize=label_font_size)
-
-    def draw(y_pos, df, is_top):
-        for idx, row in df[df['표시']==True].iterrows():
-            s,e,cat = row['시작'], row['종료'], row['종류']
-            # 잘린 영역 밖이면 완전히 스킵
-            if e <= final_start or s >= final_end: continue
-            # Enzyme/Primer는 시작점이 영역 안에 있을 때만
-            if cat in ("Enzyme", "Primer"):
-                if s < final_start or s > final_end: continue
-            # 박스/Probe는 영역 경계에 클램프
-            s_clamp = max(s, final_start)
-            e_clamp = min(e, final_end)
-            sx, ex = s_clamp, e_clamp
-            w = ex - sx
-            sx_point = s
-            fname = format_text(row['이름'])
-            level, gap = row['길이_배수'], row['Y축_띄우기']
-            d = 1 if row['위로향함'] else -1
-
-            if cat == "Enzyme":
-                y0 = y_pos + gap; y1 = y0 + enzyme_line_len*level*d
-                ax.plot([sx_point,sx_point],[y0,y1], color=color_enzyme, lw=2, zorder=3)
-                ax.text(sx_point, y1+0.02*d, fname, color=color_enzyme, ha='center',
-                        va='bottom' if d==1 else 'top', fontsize=enzyme_font_size)
-            elif cat == "Exon":
-                ax.add_patch(patches.Rectangle((sx,y_pos-box_h/2), w, box_h, facecolor=color_exon, zorder=z_box))
-            elif cat == "Marker":
-                ax.add_patch(patches.Rectangle((sx,y_pos-box_h/2), w, box_h, facecolor=color_marker, zorder=z_box))
-                ax.text(sx+w/2, y_pos, fname, ha='center', va='center', fontsize=marker_font_size, zorder=z_box+1)
-            elif cat == "Promoter":
-                ax.add_patch(patches.Rectangle((sx,y_pos-box_h/2), w, box_h, facecolor=color_promoter, zorder=z_box))
-                ax.text(sx+w/2, y_pos, fname, ha='center', va='center', fontsize=marker_font_size, color='#000000', zorder=z_box+1)
-            elif cat == "Probe":
-                yp = y_pos+0.15 if y_pos==y_wt else y_pos-0.18
-                ax.add_patch(patches.Rectangle((sx,yp), w, probe_h, facecolor=color_probe, alpha=0.8))
-                ax.text(sx+w/2, yp+probe_h/2, fname, ha='center', va='center', fontsize=label_font_size)
-            elif cat == "Primer":
-                p = 1 if is_top else -1
-                if row['위로향함']: p = -p
-                y0 = y_pos + gap*p; y1 = y0 + primer_offset_base*p*level
-                ax.plot([sx_point,sx_point],[y0,y1], color=color_line, lw=1, zorder=z_primer)
-                dx = 120 if row['방향']==1 else -120
-                ax.arrow(sx_point, y1, dx, 0, head_width=0.012, head_length=50,
-                         fc=color_line, ec=color_line, lw=1, zorder=z_primer)
-                ax.text(sx_point+dx/2, y1+0.015*p, fname, ha='center',
-                        va='bottom' if p==1 else 'top', color=text_color, fontsize=primer_font_size, zorder=z_primer)
-
-    draw(y_wt, wt_df_edited, True)
-    draw(y_mut, mut_df_edited, False)
-
-    if show_hr:
-        for _, row in hr_edited.iterrows():
-            wt_k = str(row.get('WT_이름','')).strip()
-            mut_k = str(row.get('Mutant_이름','')).strip()
-            if not wt_k or not mut_k or wt_k.lower()=='nan' or mut_k.lower()=='nan': continue
-            wm = wt_df_edited[(wt_df_edited['표시']==True) & (wt_df_edited['이름']==wt_k)]
-            mm = mut_df_edited[(mut_df_edited['표시']==True) & (mut_df_edited['이름']==mut_k)]
-            if not wm.empty and not mm.empty:
-                wx, mx = wm.iloc[0]['시작'], mm.iloc[0]['시작']
-                if final_start <= wx <= final_end and final_start <= mx <= final_end:
-                    ax.plot([X(wx), X(mx)],[y_wt,y_mut],'--', color=color_line, lw=1, alpha=0.5, zorder=z_hr)
-
-    # Scale bar (왼쪽 위, WT 트랙 위)
-    if show_scalebar:
-        sb_x_start = final_start
-        sb_x_end = final_start + scalebar_bp
-        sb_y = 1.00   # WT(0.65)에서 충분히 위로 떨어뜨림
-        ax.plot([sb_x_start, sb_x_end], [sb_y, sb_y],
-                color=scalebar_color, lw=scalebar_lw, solid_capstyle='butt', zorder=20)
-        # 단위 자동 변환
-        if scalebar_bp >= 1000:
-            val = scalebar_bp / 1000
-            sb_label = f"{val:g} kb"   # :g → 1.0 → 1, 2.5 → 2.5
-        else:
-            sb_label = f"{scalebar_bp} bp"
-        ax.text((sb_x_start + sb_x_end) / 2, sb_y + 0.02, sb_label,
-                ha='center', va='bottom', color=scalebar_color,
-                fontsize=label_font_size, zorder=20)
-
-    # xlim: 자동 계산된 데이터 영역에 딱 맞춤. 좌측은 라벨용 여백만.
-    ax.set_xlim(final_start - label_offset_x * 1.2, final_end)
-    ax.set_ylim(0.1, 1.10)   # scale bar 공간 확보 (위쪽 여유 있게)
-    ax.axis('off')
-
-    with tab_view:
-        import base64
-        preview_buf = BytesIO()
-        fig.savefig(preview_buf, format="png", dpi=100)
-        preview_b64 = base64.b64encode(preview_buf.getvalue()).decode()
-
-        col_mode, col_zoom = st.columns([1, 3])
-        with col_mode:
-            view_mode = st.radio("보기 모드", ["화면 맞춤", "확대"], horizontal=True, label_visibility="collapsed")
-        with col_zoom:
-            if view_mode == "확대":
-                preview_zoom = st.slider("확대 (%)", 50, 400, 150, step=10, label_visibility="collapsed")
+        if st.button("GenBank 파일 생성 🚀", key="m_run"):
+            if not gene_id_m:
+                st.warning("Gene ID를 입력해 주세요.")
+            elif out_mode_m in ("mut", "both") and not ins_rec_m:
+                st.warning("삽입할 마커(GenBank) 파일을 업로드해 주세요.")
             else:
-                preview_zoom = None
+                _pa     = st.session_state.get('m_pa', '')
+                _pb     = st.session_state.get('m_pb', None)
+                _p_list = [dict(p) for p in st.session_state.m_primers]
+                job = {
+                    'id': gene_id_m,
+                    'p_list': _p_list,
+                    'pb_list_wt': st.session_state.m_probes_wt,
+                    'pb_list_mut': st.session_state.m_probes_mut,
+                    'enz': enz_m,
+                    'out_mode': out_mode_m,
+                    'out_name': out_name_m or gene_id_m,
+                    'mode': st.session_state.get('m_ins_mode', 'insert'),
+                    'pa': _pa,
+                    'pb': _pb,
+                    'ins_rec': ins_rec_m, 
+                }
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, "a") as zf:
+                    success, errors = write_records_to_zip(zf, [job], flank_size, topology, zip_structure)
+                if success:
+                    now = datetime.now().strftime("%Y%m%d_%H%M")
+                    st.success(f"✅ 총 {success}개의 파일 생성이 완료되었습니다. (Topology: {topology})")
+                    st.download_button(f"📥 다운로드 ({now})", zip_buf.getvalue(), f"Results_{now}.zip")
+                for e in errors: st.write(e)
 
-        if view_mode == "화면 맞춤":
-            img_style = "display:block; max-width:100%; height:auto; margin:0 auto;"
-            box_style = "overflow:hidden;"
-        else:
-            img_style = f"display:block; max-width:none; width:{preview_zoom}%; height:auto;"
-            box_style = "overflow-x:auto; overflow-y:auto; max-height:600px;"
+    else:
+        st.markdown("""
+**통합 양식 시트 구성 안내** (사이드바에서 다운로드 가능):
 
-        st.markdown(
-            f"""
-            <div style="{box_style} border:1px solid #ddd; border-radius:6px; padding:8px; background:#fff;">
-                <img src="data:image/png;base64,{preview_b64}" style="{img_style}" />
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption("💡 '화면 맞춤'은 자동 축소, '확대'는 슬라이더로 배율을 조절하고 스크롤로 탐색합니다. 다운로드는 항상 풀 해상도.")
-        st.markdown("---")
-        d1,d2,d3 = st.columns(3)
-        for col, fmt, mime, label, fname in [
-            (d1,"png","image/png","📸 PNG","figure.png"),
-            (d2,"svg","image/svg+xml","🎨 SVG","figure.svg"),
-            (d3,"pdf","application/pdf","📄 PDF","figure.pdf"),
-        ]:
-            buf = BytesIO()
-            kw = {"dpi":dpi_setting} if fmt=="png" else {}
-            fig.savefig(buf, format=fmt, bbox_inches='tight', **kw)
-            with col:
-                st.download_button(label, data=buf.getvalue(), file_name=fname, mime=mime)
-else:
-    with tab_edit: st.info("먼저 '파일 업로드' 탭에서 GenBank 파일 두 개를 올려주세요.")
-    with tab_hr: st.info("파일 업로드 후 사용할 수 있습니다.")
-    with tab_view: st.info("파일 업로드 후 미리보기가 표시됩니다.")
+| 시트명 | 주요 기입 항목 |
+|------|-----------|
+| `Primers` | Gene ID / Primer Name / Sequence |
+| `Probes_WT` | Gene ID / Probe Start Primer / Probe End Primer |
+| `Probes_MUT` | Gene ID / Probe Start Primer / Probe End Primer |
+| `Enzymes` | Gene ID / Enzymes |
+| `Jobs` | Gene ID / **Output Mode** / Insert Mode / Primer A / Primer A Overlap / Primer B / Primer B Overlap / Insert GB Filename / Output Filename |
+
+* `Output Mode`: `wt` / `mut` / `both` (WT 서열만 출력 시 삽입 관련 옵션은 무시됩니다.)
+        """)
+
+        excel_file = st.file_uploader("작성된 통합 엑셀 파일 업로드", type=["xlsx"], key="batch_excel")
+        gb_uploads = st.file_uploader("삽입 서열 파일 업로드 (다중 선택 가능)",
+                                      type=["gb","gbk"], accept_multiple_files=True, key="batch_gb")
+        gb_dict = {}
+        if gb_uploads:
+            for f in gb_uploads:
+                try:
+                    rec = SeqIO.read(StringIO(f.read().decode("utf-8")), "genbank")
+                    gb_dict[f.name] = rec
+                    st.success(f"✅ {f.name}: {rec.id} ({len(rec.seq)} bp) 정상 로드")
+                except Exception as e:
+                    st.error(f"❌ {f.name} 파일 로드 실패: {e}")
+
+        if st.button("GenBank 파일 생성 🚀", key="batch_run"):
+            if not excel_file:
+                st.warning("엑셀 파일을 업로드해 주세요.")
+            else:
+                try:
+                    df_jobs    = pd.read_excel(excel_file, sheet_name='Jobs')
+                    df_primers = pd.read_excel(excel_file, sheet_name='Primers')
+                    df_enz     = pd.read_excel(excel_file, sheet_name='Enzymes')
+                    
+                    try:
+                        df_probes_wt = pd.read_excel(excel_file, sheet_name='Probes_WT')
+                    except Exception:
+                        df_probes_wt = pd.DataFrame(columns=['Gene ID', 'Probe Start Primer', 'Probe End Primer'])
+                    
+                    try:
+                        df_probes_mut = pd.read_excel(excel_file, sheet_name='Probes_MUT')
+                    except Exception:
+                        df_probes_mut = pd.DataFrame(columns=['Gene ID', 'Probe Start Primer', 'Probe End Primer'])
+
+                    def clean(v): return '' if str(v).strip().lower() == 'nan' else str(v).strip()
+
+                    jobs = []
+                    for _, row in df_jobs.iterrows():
+                        gene     = clean(row['Gene ID'])
+                        out_mode = clean(row.get('Output Mode', 'wt')).lower()
+                        out_mode = out_mode if out_mode in ('wt','mut','both') else 'wt'
+                        ins_mode = clean(row.get('Insert Mode', 'insert')).lower()
+                        pa       = clean(row.get('Primer A', ''))
+                        pa_ov    = clean(row.get('Primer A Overlap', ''))
+                        pb       = clean(row.get('Primer B', ''))
+                        pb_ov    = clean(row.get('Primer B Overlap', ''))
+                        gb_fname = clean(row.get('Insert GB Filename', ''))
+                        out_nm   = clean(row.get('Output Filename', '')) or gene
+
+                        p_list = [
+                            {
+                                'name': clean(r['Primer Name']),
+                                'seq':  clean(r['Sequence']),
+                                'overlap': pa_ov if clean(r['Primer Name']) == pa else (pb_ov if clean(r['Primer Name']) == pb else "")
+                            }
+                            for _, r in df_primers[df_primers['Gene ID'] == gene].iterrows()
+                        ]
+                        
+                        pb_list_wt = [
+                            {'p1': clean(r['Probe Start Primer']), 'p2': clean(r['Probe End Primer'])}
+                            for _, r in df_probes_wt[df_probes_wt['Gene ID'] == gene].iterrows()
+                        ]
+                        
+                        pb_list_mut = [
+                            {'p1': clean(r['Probe Start Primer']), 'p2': clean(r['Probe End Primer'])}
+                            for _, r in df_probes_mut[df_probes_mut['Gene ID'] == gene].iterrows()
+                        ]
+                        
+                        enz = df_enz[df_enz['Gene ID'] == gene]['Enzymes'].iloc[0] \
+                              if gene in df_enz['Gene ID'].values else ""
+
+                        ins_rec  = None
+                        if out_mode in ('mut', 'both'):
+                            if not gb_fname or gb_fname not in gb_dict:
+                                st.error(f"❌ {gene}: 대상 마커 파일('{gb_fname}')이 업로드되지 않았습니다.")
+                                continue
+                            ins_rec = gb_dict[gb_fname]
+
+                        jobs.append({
+                            'id': gene, 'p_list': p_list, 'pb_list_wt': pb_list_wt, 'pb_list_mut': pb_list_mut, 'enz': enz,
+                            'out_mode': out_mode, 'out_name': out_nm,
+                            'mode': ins_mode, 'pa': pa,
+                            'pb': pb if ins_mode == 'replace' else None,
+                            'ins_rec': ins_rec,
+                        })
+
+                    if jobs:
+                        zip_buf = BytesIO()
+                        with zipfile.ZipFile(zip_buf, "a") as zf:
+                            success, errors = write_records_to_zip(zf, jobs, flank_size, topology, zip_structure)
+                        if success:
+                            now = datetime.now().strftime("%Y%m%d_%H%M")
+                            st.success(f"✅ 총 {success}개의 파일 생성이 완료되었습니다. (Topology: {topology})")
+                            st.download_button(f"📥 다운로드 ({now})", zip_buf.getvalue(), f"Results_{now}.zip")
+                        for e in errors: st.write(e)
+
+                except Exception as ex:
+                    st.error(f"엑셀 데이터 처리 오류: {ex}")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# GB → DNA 변환 탭
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_conv:
+    st.header("🔄 GB → DNA 확장자 일괄 변환")
+    st.info("업로드된 `.gb` 또는 `.gbk` 파일의 확장자를 `.dna`로 일괄 변환하여 ZIP 압축 파일로 제공합니다.")
+    conv_files = st.file_uploader("변환 대상 파일 선택", type=["gb","gbk"],
+                                  accept_multiple_files=True, key="conv_files")
+    if conv_files:
+        st.write(f"업로드된 파일 총 {len(conv_files)}개:")
+        for f in conv_files:
+            st.write(f"  • {f.name} → {f.name.rsplit('.', 1)[0]}.dna")
+        if st.button("🔄 파일 변환 및 ZIP 다운로드", key="conv_run"):
+            zip_buf = BytesIO()
+            with zipfile.ZipFile(zip_buf, "w") as zf:
+                for f in conv_files:
+                    zf.writestr(f.name.rsplit('.', 1)[0] + ".dna", f.read())
+            now = datetime.now().strftime("%Y%m%d_%H%M")
+            st.success(f"✅ {len(conv_files)}개 파일의 포맷 변환이 완료되었습니다.")
+            st.download_button(f"📥 변환된 파일 다운로드 ({now})", zip_buf.getvalue(), f"DNA_files_{now}.zip")
