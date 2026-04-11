@@ -66,6 +66,25 @@ for k, v in PRESET_DEFAULTS.items():
 with st.sidebar:
     st.header("⚙️ 컨트롤 패널")
 
+    # ==========================================
+    # [추가된 코드] 가이드 파일 다운로드 버튼
+    # ==========================================
+    with st.expander("ℹ️ 사용 가이드 다운로드", expanded=False):
+        st.caption("유전자 맵 스튜디오의 상세 사용법과 꿀팁을 확인하세요.")
+        try:
+            # 워드 파일 읽기
+            with open("🧬 논문 피규어용 유전자 맵 스튜디오 사용 가이드.docx", "rb") as guide_file:
+                st.download_button(
+                    label="📄 가이드 다운로드 (.docx)",
+                    data=guide_file,
+                    file_name="논문_피규어_유전자맵_스튜디오_사용가이드.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )
+        except FileNotFoundError:
+            st.error("⚠️ 가이드 파일이 서버에 없습니다.")
+    # ==========================================
+
     with st.expander("💾 프리셋 (내 기본값)", expanded=True):
         st.caption("현재 설정을 JSON으로 저장하거나, 저장한 파일을 불러와서 한 번에 복원합니다.")
 
