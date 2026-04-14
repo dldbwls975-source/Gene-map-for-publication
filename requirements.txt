@@ -3,3 +3,4 @@ pandas
 biopython
 openpyxl
 python-docx
+matplotlib
