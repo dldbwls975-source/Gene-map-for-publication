@@ -86,32 +86,33 @@ ACTIVE_FONT = setup_font()
 PRESET_DEFAULTS = {
     # 텍스트
     "text_color": "#000000",
-    "label_font_size": 13,
-    "marker_font_size": 11,
-    "enzyme_font_size": 10,
-    "primer_font_size": 10,
+    "label_font_size": 11,
+    "marker_font_size": 9,
+    "enzyme_font_size": 9,
+    "primer_font_size": 9,
     # 색상
     "color_exon": "#002060", "color_marker": "#FFC000",
     "color_enzyme": "#FF0000", "color_promoter": "#AAAAAA",
     "color_probe": "#92D050", "color_line": "#000000",
     # 캔버스 (가로만 지정, 세로는 내용에 맞춰 자동)
-    "fig_width": 9.0,
+    "fig_width": 7.2,
     "label_area_mm": 26.0,
     "dpi_setting": 600,
     # 요소 크기 (mm)
-    "box_h_mm": 3.5,
-    "probe_h_mm": 3.5,
-    "enzyme_tick_mm": 3.5,
-    "primer_stem_mm": 5.0,
-    "track_gap_mm": 8.0,
-    "line_width": 2.0,
+    "box_h_mm": 3.0,
+    "probe_h_mm": 3.0,
+    "enzyme_tick_mm": 2.5,
+    "primer_stem_mm": 3.5,
+    "arrow_mm": 2.5,
+    "track_gap_mm": 6.0,
+    "line_width": 1.5,
     # 범위
     "trim_left": 0, "trim_right": 0,
     # 옵션
     "show_scalebar": True, "scalebar_bp": 1000,
     "scalebar_color": "#000000", "scalebar_lw": 2.5,
     "show_hr": True,
-    "dedup_enzyme": True,
+    "dedup_enzyme": False,
     "auto_stagger": True,
     # 자동 인식 규칙 (직접 수정 가능)
     "rule_marker": "NAT, NEO, HYG, HPH, TRP1, URA5, URA3, ADE2, G418, BLE, SAT1, KAN, ZEO, NOU, PUR",
@@ -193,6 +194,7 @@ with st.sidebar:
         probe_h_mm = st.slider("Probe 높이", 1.0, 10.0, step=0.5, key="probe_h_mm")
         enzyme_tick_mm = st.slider("Enzyme 눈금 길이", 1.0, 12.0, step=0.5, key="enzyme_tick_mm")
         primer_stem_mm = st.slider("Primer 세로선 길이", 1.0, 15.0, step=0.5, key="primer_stem_mm")
+        arrow_mm = st.slider("Primer 화살표 길이", 1.0, 10.0, step=0.5, key="arrow_mm")
         track_gap_mm = st.slider("WT–Mutant 최소 간격", 2.0, 30.0, step=1.0, key="track_gap_mm")
         line_width = st.slider("Backbone 두께 (pt)", 0.5, 5.0, step=0.5, key="line_width")
 
@@ -209,8 +211,11 @@ with st.sidebar:
         st.caption("1000 bp 이상은 자동으로 kb로 표기됩니다.")
 
     with st.expander("🔧 겹침 처리 & 기타", expanded=True):
-        auto_stagger = st.checkbox("라벨 자동 계단 배치", key="auto_stagger")
-        st.caption("라벨끼리 부딪히면 위쪽 단으로 자동으로 올려 겹침을 없앱니다.")
+        auto_stagger = st.checkbox("라벨 겹침 자동 해소", key="auto_stagger")
+        st.caption(
+            "먼저 한 줄 안에서 좌우로만 밀어 겹침을 없애고(원래 위치에서 5 mm 이상 밀려야 하는 "
+            "라벨만 윗단으로 올림), 많이 밀린 라벨에는 가는 지시선을 그립니다."
+        )
         dedup_enzyme = st.checkbox("같은 효소는 첫 사이트에만 라벨", key="dedup_enzyme")
         st.caption("눈금은 모두 그리고 이름만 한 번 표기하는, 제한효소 지도의 표준 방식입니다.")
         show_hr = st.checkbox("HR 점선 표시", key="show_hr")
@@ -370,10 +375,12 @@ def parse_to_dataframe(file_content, is_mutant, rules_key):
                 and name.upper() not in all_enzymes and name.upper().replace(" ", "") not in all_enzymes:
             notes.append(f"{name} ({end - start} bp) → 길이로 {category} 추정")
 
-        if category in ("Enzyme", "Probe"):
-            up_default = not is_mutant
+        if category == "Enzyme":
+            up_default = False            # 효소는 선 아래 한 줄
         elif category == "Primer":
-            up_default = is_mutant
+            up_default = True             # 프라이머는 선 위 한 줄
+        elif category == "Probe":
+            up_default = not is_mutant    # WT는 위, Mutant는 아래
         else:
             up_default = True
 
@@ -410,24 +417,61 @@ def text_height(fs):
     return fs * 1.35 / 72.0
 
 
-def assign_tiers(items, fs, bp_per_inch, min_gap_bp, enabled=True):
-    """items: [(index, x_bp, label)] → {index: tier}. 겹치지 않는 가장 낮은 단에 배치."""
-    tiers = {}
+def pack_row(items, gap_bp):
+    """한 줄 안에서 라벨이 겹치지 않도록 가로로만 밀어낸다.
+    원래 위치에서의 이동량 제곱합을 최소화하는 배치(등위회귀, PAVA)."""
+    n = len(items)
+    if n == 0:
+        return {}
+    W = [w + gap_bp for _, _, w in items]
+    prefix, acc = [], 0.0
+    for w in W:
+        prefix.append(acc)
+        acc += w
+    u = [items[i][1] - W[i] / 2 - prefix[i] for i in range(n)]
+
+    vals, cnts = [], []
+    for x in u:
+        vals.append(x)
+        cnts.append(1)
+        while len(vals) > 1 and vals[-2] > vals[-1]:
+            v2, c2 = vals.pop(), cnts.pop()
+            v1, c1 = vals.pop(), cnts.pop()
+            vals.append((v1 * c1 + v2 * c2) / (c1 + c2))
+            cnts.append(c1 + c2)
+    v = []
+    for val, c in zip(vals, cnts):
+        v.extend([val] * c)
+
+    return {items[i][0]: v[i] + prefix[i] + W[i] / 2 for i in range(n)}
+
+
+def place_labels(items, fs, bp_per_inch, gap_bp, max_shift, enabled, max_tiers=3):
+    """items: [(idx, x_ideal, label)] → {idx: (tier, x_label)}.
+    먼저 한 줄에 다 넣어보고, 너무 멀리 밀려나는 것만 윗단으로 올린다."""
+    if not items:
+        return {}
     if not enabled:
-        return {i: 0 for i, _, _ in items}
-    edges = []
-    for idx, x, label in sorted(items, key=lambda t: t[1]):
-        half = text_bp_width(label, fs, bp_per_inch) / 2.0
-        left, right = x - half, x + half
-        for i, edge in enumerate(edges):
-            if left > edge + min_gap_bp:
-                edges[i] = right
-                tiers[idx] = i
-                break
-        else:
-            edges.append(right)
-            tiers[idx] = len(edges) - 1
-    return tiers
+        return {i: (0, x) for i, x, _ in items}
+
+    result = {}
+    remaining = sorted(items, key=lambda t: t[1])
+    for tier in range(max_tiers):
+        sized = [(i, x, text_bp_width(l, fs, bp_per_inch)) for i, x, l in remaining]
+        packed = pack_row(sized, gap_bp)
+        last = tier == max_tiers - 1
+        pushed = []
+        for i, x, l in remaining:
+            if last or abs(packed[i] - x) <= max_shift:
+                result[i] = (tier, packed[i])
+            else:
+                pushed.append((i, x, l))
+        if not pushed or len(pushed) == len(remaining):
+            for i, x, l in pushed:
+                result[i] = (tier, packed[i])
+            break
+        remaining = pushed
+    return result
 
 
 def enzyme_label_flags(df, dedup):
@@ -451,7 +495,9 @@ def plan_track(df, cfg):
     extent = {1: cfg["box_h"] / 2.0, -1: cfg["box_h"] / 2.0}
     vis = df[df["표시"] == True]
     flags = enzyme_label_flags(df, cfg["dedup_enzyme"])
-    gap_bp = 1.2 * MM * cfg["bp_per_inch"]
+    gap_bp = 1.0 * MM * cfg["bp_per_inch"]
+    max_shift = 5.0 * MM * cfg["bp_per_inch"]   # 이보다 더 밀려야 하면 윗단으로
+    arrow_dx = cfg["arrow_mm"] * MM * cfg["bp_per_inch"]
 
     for side in (1, -1):
         base = 0.0
@@ -460,36 +506,39 @@ def plan_track(df, cfg):
         rows = [(i, r) for i, r in vis.iterrows()
                 if r["종류"] == "Enzyme" and (1 if r["위로향함"] else -1) == side]
         labeled = [(i, float(r["시작"]), str(r["이름"])) for i, r in rows if flags.get(i, True)]
-        tiers = assign_tiers(labeled, cfg["enzyme_font_size"], cfg["bp_per_inch"],
-                             gap_bp, cfg["auto_stagger"])
+        placed = place_labels(labeled, cfg["enzyme_font_size"], cfg["bp_per_inch"],
+                              gap_bp, max_shift, cfg["auto_stagger"])
         th = text_height(cfg["enzyme_font_size"])
         top = base
         for i, r in rows:
-            tier = tiers.get(i, 0)
+            x0 = float(r["시작"])
+            tier, xlab = placed.get(i, (0, x0))
             y0 = base + float(r["Y_띄우기_mm"]) * MM
             y1 = y0 + cfg["enzyme_tick"] * float(r["길이_배수"]) + tier * (th + 0.6 * MM)
             has_label = flags.get(i, True)
-            plan[i] = {"kind": "Enzyme", "side": side, "y0": y0, "y1": y1, "label": has_label}
-            top = max(top, y1 + (th + 0.6 * MM if has_label else 0.0))
+            plan[i] = {"kind": "Enzyme", "side": side, "y0": y0, "y1": y1,
+                       "label": has_label, "xlab": xlab, "xtip": x0}
+            top = max(top, y1 + (th + 1.2 * MM if has_label else 0.0))
         if rows:
             base = top + 1.0 * MM
 
         # --- Primer ---
         rows = [(i, r) for i, r in vis.iterrows()
                 if r["종류"] == "Primer" and (1 if r["위로향함"] else -1) == side]
-        arrow_dx = cfg["span"] * 0.022
         labeled = [(i, float(r["시작"]) + arrow_dx / 2 * (1 if r["방향"] == 1 else -1),
                     str(r["이름"])) for i, r in rows]
-        tiers = assign_tiers(labeled, cfg["primer_font_size"], cfg["bp_per_inch"],
-                             gap_bp, cfg["auto_stagger"])
+        placed = place_labels(labeled, cfg["primer_font_size"], cfg["bp_per_inch"],
+                              gap_bp, max_shift, cfg["auto_stagger"])
         th = text_height(cfg["primer_font_size"])
         top = base
         for i, r in rows:
-            tier = tiers.get(i, 0)
+            ideal = float(r["시작"]) + arrow_dx / 2 * (1 if r["방향"] == 1 else -1)
+            tier, xlab = placed.get(i, (0, ideal))
             y0 = base + float(r["Y_띄우기_mm"]) * MM
             y1 = y0 + cfg["primer_stem"] * float(r["길이_배수"]) + tier * (th + 0.6 * MM)
-            plan[i] = {"kind": "Primer", "side": side, "y0": y0, "y1": y1, "label": True}
-            top = max(top, y1 + th + 0.6 * MM)
+            plan[i] = {"kind": "Primer", "side": side, "y0": y0, "y1": y1,
+                       "label": True, "xlab": xlab, "xtip": ideal, "dx": arrow_dx}
+            top = max(top, y1 + th + 1.2 * MM)
         if rows:
             base = top + 1.0 * MM
 
@@ -510,7 +559,8 @@ def plan_track(df, cfg):
 
         extent[side] = max(extent[side], base)
 
-    # --- 박스류: 라벨이 박스보다 길면 자동 축소, 그래도 안 되면 바깥으로 ---
+    # --- 박스류: 라벨이 박스보다 길면 6pt까지 축소, 그래도 넘치면 스택 바깥으로 ---
+    overflow, long_names = [], []
     for i, r in vis.iterrows():
         if r["종류"] not in ("Exon", "Marker", "Promoter"):
             continue
@@ -520,16 +570,28 @@ def plan_track(df, cfg):
         if r["종류"] in ("Marker", "Promoter"):
             need = text_bp_width(r["이름"], fs, cfg["bp_per_inch"])
             if need > w * 0.92:
-                fs = max(7.0, fs * (w * 0.92) / max(need, 1e-9))
-                if fs <= 7.0 and text_bp_width(r["이름"], fs, cfg["bp_per_inch"]) > w * 0.92:
+                fs = max(6.0, fs * (w * 0.92) / max(need, 1e-9))
+                if text_bp_width(r["이름"], fs, cfg["bp_per_inch"]) > w * 0.92:
                     outside = True
                     fs = cfg["marker_font_size"]
-        plan[i] = {"kind": r["종류"], "side": cfg["out_side"], "fontsize": fs, "outside": outside}
-        if outside:
-            need_y = cfg["box_h"] / 2.0 + 1.0 * MM + text_height(fs)
-            extent[cfg["out_side"]] = max(extent[cfg["out_side"]], need_y)
+                    overflow.append((i, float(r["시작"]) + w / 2, str(r["이름"])))
+                    long_names.append(str(r["이름"]))
+        plan[i] = {"kind": r["종류"], "side": cfg["out_side"], "fontsize": fs,
+                   "outside": outside}
 
-    return plan, extent
+    if overflow:
+        side_out = 1 if extent[1] <= extent[-1] else -1
+        th = text_height(cfg["marker_font_size"])
+        y_out = extent[side_out] + 1.2 * MM
+        placed = place_labels(overflow, cfg["marker_font_size"], cfg["bp_per_inch"],
+                              gap_bp, max_shift, True, max_tiers=2)
+        for i, x, name in overflow:
+            tier, xlab = placed.get(i, (0, x))
+            plan[i].update(side=side_out, y_out=y_out + tier * (th + 0.6 * MM), xlab=xlab)
+        extent[side_out] = y_out + (max(t for t, _ in placed.values()) if placed else 0) \
+            * (th + 0.6 * MM) + th
+
+    return plan, extent, long_names
 
 
 # ============================================================
@@ -643,12 +705,12 @@ cfg_common = dict(
     box_h=box_h, probe_h=probe_h,
     enzyme_tick=enzyme_tick, primer_stem=primer_stem,
     enzyme_font_size=enzyme_font_size, primer_font_size=primer_font_size,
-    marker_font_size=marker_font_size,
+    marker_font_size=marker_font_size, arrow_mm=arrow_mm,
     dedup_enzyme=dedup_enzyme, auto_stagger=auto_stagger,
 )
 
-wt_plan, wt_ext = plan_track(wt_df, dict(cfg_common, out_side=1))
-mut_plan, mut_ext = plan_track(mut_df, dict(cfg_common, out_side=-1))
+wt_plan, wt_ext, wt_long = plan_track(wt_df, dict(cfg_common, out_side=1))
+mut_plan, mut_ext, mut_long = plan_track(mut_df, dict(cfg_common, out_side=-1))
 
 gap = wt_ext[-1] + mut_ext[1] + track_gap_mm * MM
 y_wt = 0.0
@@ -709,19 +771,33 @@ def draw_track(track_y, df, plan):
             y1 = track_y + side * geo["y1"]
             va = "bottom" if side == 1 else "top"
 
+            xlab = geo.get("xlab", s)
+            xtip = geo.get("xtip", s)
+            lead_min = 1.0 * MM * bp_per_inch
+            y_text = y1 + side * 1.0 * MM
+
             if kind == "Enzyme":
-                ax.plot([s, s], [y0, y1], color=color_enzyme, lw=1.2, zorder=Z_BOX - 1)
+                ax.plot([s, s], [y0, y1], color=color_enzyme, lw=1.0,
+                        solid_capstyle="butt", zorder=Z_BOX - 1)
                 if geo["label"]:
-                    ax.text(s, y1 + side * 0.5 * MM, name, color=color_enzyme,
-                            ha="center", va=va, fontsize=enzyme_font_size, zorder=Z_MARK)
+                    if abs(xlab - xtip) > lead_min:
+                        ax.plot([xtip, xlab], [y1, y1 + side * 0.8 * MM],
+                                color=color_enzyme, lw=0.5, alpha=0.75, zorder=Z_BOX - 1)
+                    ax.text(xlab, y_text, name, color=color_enzyme, ha="center", va=va,
+                            fontsize=enzyme_font_size, zorder=Z_MARK)
             else:
-                ax.plot([s, s], [y0, y1], color=color_line, lw=1.0, zorder=Z_BOX - 1)
-                dx = span * 0.022 * (1 if row["방향"] == 1 else -1)
+                dx = geo.get("dx", 2.5 * MM * bp_per_inch) * (1 if row["방향"] == 1 else -1)
+                ax.plot([s, s], [y0, y1], color=color_line, lw=0.9,
+                        solid_capstyle="butt", zorder=Z_BOX - 1)
                 ax.annotate("", xy=(s + dx, y1), xytext=(s, y1),
                             arrowprops=dict(arrowstyle="-|>", color=color_line,
-                                            lw=1.0, mutation_scale=9),
+                                            lw=0.9, mutation_scale=7,
+                                            shrinkA=0, shrinkB=0),
                             zorder=Z_BOX - 1)
-                ax.text(s + dx / 2, y1 + side * 0.6 * MM, name, ha="center", va=va,
+                if abs(xlab - xtip) > lead_min:
+                    ax.plot([xtip, xlab], [y1, y1 + side * 0.8 * MM],
+                            color=color_line, lw=0.5, alpha=0.7, zorder=Z_BOX - 1)
+                ax.text(xlab, y_text, name, ha="center", va=va,
                         color=text_color, fontsize=primer_font_size, zorder=Z_MARK)
             continue
 
@@ -749,7 +825,8 @@ def draw_track(track_y, df, plan):
             fs = geo.get("fontsize", marker_font_size)
             if geo.get("outside"):
                 side = geo["side"]
-                ax.text(sx + w / 2, track_y + side * (box_h / 2 + 1 * MM), name,
+                ax.text(geo.get("xlab", sx + w / 2),
+                        track_y + side * geo.get("y_out", box_h / 2 + 1 * MM), name,
                         ha="center", va="bottom" if side == 1 else "top",
                         fontsize=fs, color=text_color, zorder=Z_MARK)
             else:
@@ -804,6 +881,12 @@ with tab_view:
             "양 끝 자르기 범위 밖이라 그려지지 않은 요소가 있습니다 — "
             + " / ".join(parts)
             + " · 사이드바 '양 끝 자르기' 값을 줄이면 다시 나타납니다."
+        )
+    if wt_long or mut_long:
+        st.info(
+            "박스보다 이름이 길어 박스 밖에 표기한 항목: "
+            + ", ".join(sorted(set(wt_long + mut_long)))
+            + " · '요소 편집' 탭에서 이름을 줄이면 박스 안으로 들어갑니다."
         )
     preview = BytesIO()
     fig.savefig(preview, format="png", dpi=150, bbox_inches="tight",
