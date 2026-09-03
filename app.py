@@ -114,6 +114,8 @@ PRESET_DEFAULTS = {
     "scalebar_color": "#000000", "scalebar_lw": 2.5,
     "show_hr": True,
     "dedup_enzyme": False,
+    "exon_arrow": True,
+    "exon_head_ratio": 1.8,
     "auto_stagger": True,
     # 자동 인식 규칙 (직접 수정 가능)
     "rule_marker": "NAT, NEO, HYG, HPH, TRP1, URA5, URA3, ADE2, G418, BLE, SAT1, KAN, ZEO, NOU, PUR",
@@ -126,6 +128,7 @@ PRESET_DEFAULTS = {
 }
 
 CATEGORIES = ["Exon", "Marker", "Promoter", "Primer", "Enzyme", "Probe"]
+ARROW_CHOICES = ["자동", "없음", "→", "←"]
 
 for _k, _v in PRESET_DEFAULTS.items():
     if _k not in st.session_state:
@@ -196,6 +199,8 @@ with st.sidebar:
         enzyme_tick_mm = st.slider("Enzyme 눈금 길이", 1.0, 12.0, step=0.5, key="enzyme_tick_mm")
         primer_stem_mm = st.slider("Primer 세로선 길이", 1.0, 15.0, step=0.5, key="primer_stem_mm")
         arrow_mm = st.slider("Primer 화살표 길이", 1.0, 10.0, step=0.5, key="arrow_mm")
+        exon_head_ratio = st.slider("Exon 화살촉 폭 (박스 대비)", 1.0, 3.0, step=0.1,
+                                    key="exon_head_ratio")
         track_gap_mm = st.slider("WT–Mutant 최소 간격", 2.0, 30.0, step=1.0, key="track_gap_mm")
         line_width = st.slider("Backbone 두께 (pt)", 0.5, 5.0, step=0.5, key="line_width")
 
@@ -219,6 +224,8 @@ with st.sidebar:
         )
         dedup_enzyme = st.checkbox("같은 효소는 첫 사이트에만 라벨", key="dedup_enzyme")
         st.caption("눈금은 모두 그리고 이름만 한 번 표기하는, 제한효소 지도의 표준 방식입니다.")
+        exon_arrow = st.checkbox("마지막 exon을 화살표로", key="exon_arrow")
+        st.caption("유전자 방향(strand)을 보고 끝쪽 exon의 끝을 뾰족하게 그립니다.")
         show_hr = st.checkbox("HR 점선 표시", key="show_hr")
 
     with st.expander("🧠 자동 인식 규칙"):
@@ -393,6 +400,7 @@ def parse_to_dataframe(file_content, is_mutant, rules_key):
             "표시": show,
             "이름": name,
             "종류": category,
+            "화살표": "자동",
             "길이_배수": 1.0,
             "Y_띄우기_mm": 0.0,
             "위로향함": up_default,
@@ -564,24 +572,55 @@ def plan_track(df, cfg):
         extent[side] = max(extent[side], base)
 
     # --- 박스류: 라벨이 박스보다 길면 6pt까지 축소, 그래도 넘치면 스택 바깥으로 ---
+    exon_rows = [(i, r) for i, r in vis.iterrows() if r["종류"] == "Exon"]
+    arrow_idx, arrow_dir = None, 1
+    if cfg.get("exon_arrow") and exon_rows:
+        strands = [int(r["방향"]) for _, r in exon_rows]
+        arrow_dir = 1 if sum(1 for x in strands if x >= 0) >= len(strands) / 2 else -1
+        key = (lambda t: float(t[1]["종료"])) if arrow_dir == 1 else (lambda t: -float(t[1]["시작"]))
+        arrow_idx = max(exon_rows, key=key)[0]
+    any_arrow = False
+
     overflow, long_names = [], []
     for i, r in vis.iterrows():
         if r["종류"] not in ("Exon", "Marker", "Promoter"):
             continue
         w = float(r["종료"]) - float(r["시작"])
+
+        choice = str(r.get("화살표", "자동"))
+        if choice == "→":
+            arrow, adir = True, 1
+        elif choice == "←":
+            arrow, adir = True, -1
+        elif choice == "없음":
+            arrow, adir = False, 1
+        else:                                   # 자동
+            arrow, adir = (i == arrow_idx), arrow_dir
+        any_arrow = any_arrow or arrow
+
+        # 화살촉 부분을 뺀 자루 폭 기준으로 라벨을 앉힌다
+        tip = min(cfg["box_h"] * cfg.get("head_ratio", 1.8) * cfg["bp_per_inch"],
+                  w * 0.45) if arrow else 0.0
+        shaft = w - tip
         fs = cfg["marker_font_size"]
         outside = False
         if r["종류"] in ("Marker", "Promoter"):
             need = text_bp_width(r["이름"], fs, cfg["bp_per_inch"])
-            if need > w * 0.92:
-                fs = max(6.0, fs * (w * 0.92) / max(need, 1e-9))
-                if text_bp_width(r["이름"], fs, cfg["bp_per_inch"]) > w * 0.92:
+            if need > shaft * 0.92:
+                fs = max(6.0, fs * (shaft * 0.92) / max(need, 1e-9))
+                if text_bp_width(r["이름"], fs, cfg["bp_per_inch"]) > shaft * 0.92:
                     outside = True
                     fs = cfg["marker_font_size"]
                     overflow.append((i, float(r["시작"]) + w / 2, str(r["이름"])))
                     long_names.append(str(r["이름"]))
         plan[i] = {"kind": r["종류"], "side": cfg["out_side"], "fontsize": fs,
-                   "outside": outside}
+                   "outside": outside, "arrow": arrow, "arrow_dir": adir,
+                   "tip": tip}
+
+    if any_arrow:   # 화살촉이 박스보다 두꺼우므로 위아래 여유 확보
+        head_half = cfg["box_h"] * cfg.get("head_ratio", 1.8) / 2.0
+        extent[1] = max(extent[1], head_half)
+        extent[-1] = max(extent[-1], head_half)
 
     if overflow:
         side_out = 1 if extent[1] <= extent[-1] else -1
@@ -640,6 +679,9 @@ editor_config = {
     "Y_띄우기_mm": None,
     "위로향함": st.column_config.CheckboxColumn("⬆️ 위로"),
     "종류": st.column_config.SelectboxColumn("🏷️ 종류", options=CATEGORIES, required=True),
+    "화살표": st.column_config.SelectboxColumn(
+        "➡️ 화살표", options=ARROW_CHOICES, required=True,
+        help="박스(Exon·Marker·Promoter)를 블록 화살표로 그립니다. 자동 = 마지막 exon만 strand 방향으로."),
     "시작": st.column_config.NumberColumn("시작(bp)", disabled=True),
     "종료": None, "방향": None,
 }
@@ -713,7 +755,8 @@ cfg_common = dict(
     enzyme_tick=enzyme_tick, primer_stem=primer_stem,
     enzyme_font_size=enzyme_font_size, primer_font_size=primer_font_size,
     marker_font_size=marker_font_size, arrow_mm=arrow_mm,
-    dedup_enzyme=dedup_enzyme, auto_stagger=auto_stagger,
+    dedup_enzyme=dedup_enzyme, auto_stagger=auto_stagger, exon_arrow=exon_arrow,
+    head_ratio=exon_head_ratio,
 )
 
 wt_plan, wt_ext, wt_long = plan_track(wt_df, dict(cfg_common, out_side=1))
@@ -825,8 +868,27 @@ def draw_track(track_y, df, plan):
 
         elif kind in ("Exon", "Marker", "Promoter"):
             face = {"Exon": color_exon, "Marker": color_marker, "Promoter": color_promoter}[kind]
-            ax.add_patch(patches.Rectangle((sx, track_y - box_h / 2), w, box_h,
-                                           facecolor=face, edgecolor="none", zorder=Z_BOX))
+            d = geo.get("arrow_dir", 1)
+            # 잘리지 않은 끝쪽 exon만 화살촉으로
+            tip_ok = geo.get("arrow") and (e <= final_end if d == 1 else s >= final_start)
+            if tip_ok:
+                head_h = box_h * exon_head_ratio
+                tip = geo.get("tip") or min(head_h * bp_per_inch, w * 0.45)
+                lo, hi = track_y - box_h / 2, track_y + box_h / 2
+                hlo, hhi = track_y - head_h / 2, track_y + head_h / 2
+                if d == 1:
+                    nx = sx + w - tip
+                    pts = [(sx, lo), (nx, lo), (nx, hlo), (sx + w, track_y),
+                           (nx, hhi), (nx, hi), (sx, hi)]
+                else:
+                    nx = sx + tip
+                    pts = [(sx + w, lo), (nx, lo), (nx, hlo), (sx, track_y),
+                           (nx, hhi), (nx, hi), (sx + w, hi)]
+                ax.add_patch(patches.Polygon(pts, closed=True, facecolor=face,
+                                             edgecolor="none", zorder=Z_BOX))
+            else:
+                ax.add_patch(patches.Rectangle((sx, track_y - box_h / 2), w, box_h,
+                                               facecolor=face, edgecolor="none", zorder=Z_BOX))
             if kind == "Exon":
                 continue
             fs = geo.get("fontsize", marker_font_size)
@@ -838,7 +900,8 @@ def draw_track(track_y, df, plan):
                         fontsize=fs, color=text_color, zorder=Z_MARK)
             else:
                 inner = "#000000" if kind in ("Marker", "Promoter") else "#FFFFFF"
-                ax.text(sx + w / 2, track_y, name, ha="center", va="center",
+                cx = sx + w / 2 - (d * geo.get("tip", 0.0) / 2 if tip_ok else 0.0)
+                ax.text(cx, track_y, name, ha="center", va="center",
                         fontsize=fs, color=inner, zorder=Z_MARK)
     return dropped
 
