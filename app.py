@@ -10,6 +10,7 @@ from matplotlib import font_manager
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from Bio import SeqIO, Restriction
 
 MM = 1.0 / 25.4  # mm → inch
@@ -496,7 +497,7 @@ def plan_track(df, cfg):
     vis = df[df["표시"] == True]
     flags = enzyme_label_flags(df, cfg["dedup_enzyme"])
     gap_bp = 1.0 * MM * cfg["bp_per_inch"]
-    max_shift = 5.0 * MM * cfg["bp_per_inch"]   # 이보다 더 밀려야 하면 윗단으로
+    max_shift = 2.5 * MM * cfg["bp_per_inch"]   # 이보다 더 밀려야 하면 윗단으로
     arrow_dx = cfg["arrow_mm"] * MM * cfg["bp_per_inch"]
 
     for side in (1, -1):
@@ -542,20 +543,23 @@ def plan_track(df, cfg):
         if rows:
             base = top + 1.0 * MM
 
-        # --- Probe (해당 면의 가장 바깥) ---
+        # --- Probe (해당 면의 가장 바깥, 같은 면끼리 높이·두께·글씨 크기 완전 동일) ---
         rows = [(i, r) for i, r in vis.iterrows()
                 if r["종류"] == "Probe" and (1 if r["위로향함"] else -1) == side]
-        for i, r in rows:
-            y0 = base + 1.0 * MM + float(r["Y_띄우기_mm"]) * MM
-            y1 = y0 + cfg["probe_h"]
-            w_bp = float(r["종료"]) - float(r["시작"])
+        if rows:
             fs = cfg["marker_font_size"]
-            need = text_bp_width(r["이름"], fs, cfg["bp_per_inch"])
-            if need > w_bp * 0.92:
-                fs = max(6.0, fs * (w_bp * 0.92) / max(need, 1e-9))
-            plan[i] = {"kind": "Probe", "side": side, "y0": y0, "y1": y1,
-                       "label": True, "fontsize": fs}
-            base = y1 + 1.0 * MM
+            th = text_height(fs)
+            y0 = base + 1.2 * MM
+            y1 = y0 + cfg["probe_h"]
+            any_outside = False
+            for i, r in rows:
+                w_bp = float(r["종료"]) - float(r["시작"])
+                need = text_bp_width(r["이름"], fs, cfg["bp_per_inch"])
+                lab_out = need > w_bp * 0.92
+                any_outside = any_outside or lab_out
+                plan[i] = {"kind": "Probe", "side": side, "y0": y0, "y1": y1,
+                           "label": True, "fontsize": fs, "label_outside": lab_out}
+            base = y1 + 1.0 * MM + (th + 0.8 * MM if any_outside else 0.0)
 
         extent[side] = max(extent[side], base)
 
@@ -597,8 +601,8 @@ def plan_track(df, cfg):
 # ============================================================
 # 메인
 # ============================================================
-tab_upload, tab_edit, tab_hr, tab_view = st.tabs(
-    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드"]
+tab_upload, tab_edit, tab_hr, tab_view, tab_free = st.tabs(
+    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드", "✍️ 직접 편집"]
 )
 
 with tab_upload:
@@ -615,6 +619,8 @@ if not (wt_file and mutant_file):
         st.info("파일 업로드 후 사용할 수 있습니다.")
     with tab_view:
         st.info("파일 업로드 후 미리보기가 표시됩니다.")
+    with tab_free:
+        st.info("파일 업로드 후 사용할 수 있습니다.")
     st.stop()
 
 rules_key = (
@@ -630,8 +636,8 @@ mut_df_raw, mut_len, mut_notes = parse_to_dataframe(
 editor_config = {
     "표시": st.column_config.CheckboxColumn("표시"),
     "이름": st.column_config.TextColumn("📝 이름"),
-    "길이_배수": st.column_config.NumberColumn("📏 선 길이", min_value=0.1, max_value=5.0, step=0.1, format="%.1f"),
-    "Y_띄우기_mm": st.column_config.NumberColumn("↕️ 띄우기(mm)", min_value=-10.0, max_value=20.0, step=0.5, format="%.1f"),
+    "길이_배수": None,
+    "Y_띄우기_mm": None,
     "위로향함": st.column_config.CheckboxColumn("⬆️ 위로"),
     "종류": st.column_config.SelectboxColumn("🏷️ 종류", options=CATEGORIES, required=True),
     "시작": st.column_config.NumberColumn("시작(bp)", disabled=True),
@@ -655,8 +661,9 @@ def summarize(df, notes, title):
 with tab_edit:
     st.caption(
         "GenBank의 모든 feature를 그대로 가져옵니다. 분류가 틀렸으면 **🏷️ 종류**를 드롭다운에서 "
-        "바꾸면 그림에 즉시 반영됩니다 — 사이드바 규칙을 고칠 필요 없이 여기서 끝납니다. "
-        "**⬆️ 위로**는 트랙 선의 위/아래를 정하고, 라벨 겹침은 자동 계단 배치가 처리합니다."
+        "바꾸면 그림에 즉시 반영됩니다. 여기서 정하는 건 네 가지뿐입니다 — "
+        "**그릴지(표시) · 뭐라고 쓸지(이름) · 무슨 종류인지(종류) · 선의 위인지 아래인지(⬆️ 위로)**. "
+        "세부 위치는 '✍️ 직접 편집' 탭에서 마우스로 옮기세요."
     )
     ec1, ec2 = st.columns(2)
     with ec1:
@@ -773,16 +780,12 @@ def draw_track(track_y, df, plan):
 
             xlab = geo.get("xlab", s)
             xtip = geo.get("xtip", s)
-            lead_min = 1.0 * MM * bp_per_inch
             y_text = y1 + side * 1.0 * MM
 
             if kind == "Enzyme":
                 ax.plot([s, s], [y0, y1], color=color_enzyme, lw=1.0,
                         solid_capstyle="butt", zorder=Z_BOX - 1)
                 if geo["label"]:
-                    if abs(xlab - xtip) > lead_min:
-                        ax.plot([xtip, xlab], [y1, y1 + side * 0.8 * MM],
-                                color=color_enzyme, lw=0.5, alpha=0.75, zorder=Z_BOX - 1)
                     ax.text(xlab, y_text, name, color=color_enzyme, ha="center", va=va,
                             fontsize=enzyme_font_size, zorder=Z_MARK)
             else:
@@ -794,9 +797,6 @@ def draw_track(track_y, df, plan):
                                             lw=0.9, mutation_scale=7,
                                             shrinkA=0, shrinkB=0),
                             zorder=Z_BOX - 1)
-                if abs(xlab - xtip) > lead_min:
-                    ax.plot([xtip, xlab], [y1, y1 + side * 0.8 * MM],
-                            color=color_line, lw=0.5, alpha=0.7, zorder=Z_BOX - 1)
                 ax.text(xlab, y_text, name, ha="center", va=va,
                         color=text_color, fontsize=primer_font_size, zorder=Z_MARK)
             continue
@@ -809,12 +809,19 @@ def draw_track(track_y, df, plan):
             side = geo["side"]
             y0 = track_y + side * geo["y0"]
             y1 = track_y + side * geo["y1"]
-            lo = min(y0, y1)
-            ax.add_patch(patches.Rectangle((sx, lo), w, abs(y1 - y0),
+            lo, hi = min(y0, y1), max(y0, y1)
+            fs = geo.get("fontsize", marker_font_size)
+            ax.add_patch(patches.Rectangle((sx, lo), w, hi - lo,
                                            facecolor=color_probe, edgecolor="none",
-                                           alpha=0.9, zorder=Z_BOX))
-            ax.text(sx + w / 2, lo + abs(y1 - y0) / 2, name, ha="center", va="center",
-                    fontsize=geo.get("fontsize", marker_font_size), zorder=Z_MARK)
+                                           zorder=Z_BOX))
+            if geo.get("label_outside"):
+                y_lab = (hi if side == 1 else lo) + side * 0.8 * MM
+                ax.text(sx + w / 2, y_lab, name, ha="center",
+                        va="bottom" if side == 1 else "top",
+                        fontsize=fs, color=text_color, zorder=Z_MARK)
+            else:
+                ax.text(sx + w / 2, (lo + hi) / 2, name, ha="center", va="center",
+                        fontsize=fs, color=text_color, zorder=Z_MARK)
 
         elif kind in ("Exon", "Marker", "Promoter"):
             face = {"Exon": color_exon, "Marker": color_marker, "Promoter": color_promoter}[kind]
@@ -907,5 +914,171 @@ with tab_view:
             st.download_button(label, data=buf.getvalue(), file_name=fname,
                                mime=mime, use_container_width=True)
     st.caption("SVG·PDF는 글자가 텍스트로 살아 있어 Illustrator에서 그대로 수정할 수 있습니다.")
+
+
+
+# ---------- ✍️ 직접 편집: 브라우저에서 요소를 마우스로 옮긴다 ----------
+with tab_free:
+    st.caption(
+        "PowerPoint처럼 요소를 끌어서 옮길 수 있습니다. 라벨·눈금·박스 아무거나 클릭한 뒤 드래그하거나, "
+        "선택 후 방향키(Shift = 크게)로 밀면 됩니다. **설정을 바꾸면 그림이 다시 그려지면서 "
+        "드래그한 위치는 초기화되니, 미세 조정은 맨 마지막에 하세요.**"
+    )
+
+    svg_buf = BytesIO()
+    fig.savefig(svg_buf, format="svg", bbox_inches="tight", pad_inches=0.05)
+    svg_src = svg_buf.getvalue().decode("utf-8")
+    svg_src = svg_src[svg_src.index("<svg"):]
+
+    stage_h = int(min(1000, 820 * fig_height / max(fig_width, 0.1))) + 110
+    html = r"""
+<style>
+  body { margin:0; font-family: Arial, sans-serif; }
+  #bar { display:flex; gap:6px; flex-wrap:wrap; align-items:center;
+         padding:6px 2px 10px; font-size:13px; }
+  #bar button { font:inherit; padding:5px 10px; border:1px solid #cfcfcf;
+                background:#fff; border-radius:6px; cursor:pointer; }
+  #bar button:hover { background:#f2f2f2; }
+  #hint { color:#666; font-size:12px; margin-left:4px; }
+  #stage { border:1px solid #e0e0e0; border-radius:8px; background:#fff;
+           padding:8px; overflow:auto; }
+  .sel { filter: drop-shadow(0 0 2.5px #2563eb); }
+  svg [id] { cursor: default; }
+</style>
+<div id="bar">
+  <button id="undo">되돌리기 (Ctrl+Z)</button>
+  <button id="reset">전부 제자리로</button>
+  <button id="dlsvg">SVG 저장</button>
+  <button id="dlpng">PNG 저장</button>
+  <button id="copy">SVG 복사</button>
+  <span id="hint">요소를 클릭 → 드래그 또는 방향키</span>
+</div>
+<div id="stage">__SVG__</div>
+<script>
+(function(){
+  const stage = document.getElementById('stage');
+  const svg = stage.querySelector('svg');
+  const vb = svg.viewBox.baseVal;
+  svg.removeAttribute('width'); svg.removeAttribute('height');
+  svg.style.width = '100%'; svg.style.height = 'auto';
+  svg.style.touchAction = 'none';
+
+  const items = Array.prototype.slice.call(svg.querySelectorAll('g[id]'))
+    .filter(function(g){
+      return /^(text_|line2d_|patch_|FancyArrow|PathCollection|PolyCollection)/.test(g.id)
+             && g.parentNode && g.parentNode.id !== 'figure_1';
+    });
+  items.forEach(function(g){ g.style.cursor = 'move'; g.style.pointerEvents = 'all'; });
+
+  function getT(el){
+    const m = /translate\(\s*([-\d.]+)[ ,]\s*([-\d.]+)\s*\)/.exec(el.getAttribute('transform') || '');
+    return m ? [parseFloat(m[1]), parseFloat(m[2])] : [0, 0];
+  }
+  function setT(el, x, y){ el.setAttribute('transform', 'translate(' + x + ',' + y + ')'); }
+  function scale(){ return vb.width / svg.getBoundingClientRect().width; }
+
+  let sel = null, drag = null;
+  const undoStack = [];
+
+  function select(el){
+    if (sel) sel.classList.remove('sel');
+    sel = el;
+    if (sel) sel.classList.add('sel');
+  }
+
+  items.forEach(function(g){
+    g.addEventListener('pointerdown', function(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      select(g);
+      const t = getT(g);
+      drag = {el: g, x0: ev.clientX, y0: ev.clientY, tx: t[0], ty: t[1], moved: false};
+      g.setPointerCapture(ev.pointerId);
+    });
+    g.addEventListener('pointermove', function(ev){
+      if (!drag || drag.el !== g) return;
+      const k = scale();
+      const nx = drag.tx + (ev.clientX - drag.x0) * k;
+      const ny = drag.ty + (ev.clientY - drag.y0) * k;
+      if (!drag.moved){ undoStack.push({el: g, t: [drag.tx, drag.ty]}); drag.moved = true; }
+      setT(g, nx, ny);
+    });
+    g.addEventListener('pointerup', function(ev){
+      if (drag && drag.el === g) g.releasePointerCapture(ev.pointerId);
+      drag = null;
+    });
+  });
+
+  stage.addEventListener('pointerdown', function(){ select(null); });
+
+  document.addEventListener('keydown', function(ev){
+    if (ev.ctrlKey && ev.key.toLowerCase() === 'z'){ undo(); ev.preventDefault(); return; }
+    if (!sel) return;
+    const step = (ev.shiftKey ? 10 : 2) * (vb.width / 800);
+    let dx = 0, dy = 0;
+    if (ev.key === 'ArrowLeft') dx = -step;
+    else if (ev.key === 'ArrowRight') dx = step;
+    else if (ev.key === 'ArrowUp') dy = -step;
+    else if (ev.key === 'ArrowDown') dy = step;
+    else return;
+    ev.preventDefault();
+    const t = getT(sel);
+    undoStack.push({el: sel, t: t});
+    setT(sel, t[0] + dx, t[1] + dy);
+  });
+
+  function undo(){
+    const last = undoStack.pop();
+    if (last) setT(last.el, last.t[0], last.t[1]);
+  }
+  document.getElementById('undo').onclick = undo;
+  document.getElementById('reset').onclick = function(){
+    items.forEach(function(g){ g.removeAttribute('transform'); });
+    undoStack.length = 0;
+  };
+
+  function serialize(){
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('width', vb.width + 'pt');
+    clone.setAttribute('height', vb.height + 'pt');
+    return new XMLSerializer().serializeToString(clone);
+  }
+  function download(blob, name){
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  document.getElementById('dlsvg').onclick = function(){
+    download(new Blob([serialize()], {type: 'image/svg+xml'}), 'figure_edited.svg');
+  };
+  document.getElementById('dlpng').onclick = function(){
+    const url = URL.createObjectURL(new Blob([serialize()], {type: 'image/svg+xml;charset=utf-8'}));
+    const img = new Image();
+    img.onload = function(){
+      const k = 4, c = document.createElement('canvas');
+      c.width = vb.width * k; c.height = vb.height * k;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      c.toBlob(function(b){ download(b, 'figure_edited.png'); });
+    };
+    img.src = url;
+  };
+  document.getElementById('copy').onclick = function(){
+    navigator.clipboard.writeText(serialize()).then(function(){
+      document.getElementById('hint').textContent = 'SVG를 클립보드에 복사했습니다.';
+    });
+  };
+})();
+</script>
+"""
+    components.html(html.replace("__SVG__", svg_src), height=stage_h, scrolling=True)
+    st.caption(
+        "저장 버튼이 브라우저 정책으로 막히면 'SVG 복사'를 눌러 텍스트 편집기에 붙여넣고 "
+        ".svg로 저장하세요. 더 자유롭게 다듬으려면 SVG를 Illustrator·Inkscape·PowerPoint에서 "
+        "열고 그룹 해제하면 모든 도형과 글자가 그대로 편집됩니다."
+    )
+
 
 plt.close(fig)
