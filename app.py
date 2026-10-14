@@ -595,7 +595,11 @@ def plan_track(df, cfg):
         elif choice == "없음":
             arrow, adir = False, 1
         else:                                   # 자동
-            arrow, adir = (i == arrow_idx), arrow_dir
+            if r["종류"] == "Marker":
+                # NAT/NEO/HYG 등 마커는 각 feature의 strand 방향으로 화살표 표시
+                arrow, adir = True, (-1 if r["방향"] == -1 else 1)
+            else:
+                arrow, adir = (i == arrow_idx), arrow_dir
         any_arrow = any_arrow or arrow
 
         # 화살촉 부분을 뺀 자루 폭 기준으로 라벨을 앉힌다
@@ -681,7 +685,7 @@ editor_config = {
     "종류": st.column_config.SelectboxColumn("🏷️ 종류", options=CATEGORIES, required=True),
     "화살표": st.column_config.SelectboxColumn(
         "➡️ 화살표", options=ARROW_CHOICES, required=True,
-        help="박스(Exon·Marker·Promoter)를 블록 화살표로 그립니다. 자동 = 마지막 exon만 strand 방향으로."),
+        help="박스(Exon·Marker·Promoter)를 블록 화살표로 그립니다. 자동 = Marker는 각 strand 방향으로, Exon은 마지막 exon만 화살표로 표시합니다."),
     "시작": st.column_config.NumberColumn("시작(bp)", disabled=True),
     "종료": None, "방향": None,
 }
@@ -869,7 +873,7 @@ def draw_track(track_y, df, plan):
         elif kind in ("Exon", "Marker", "Promoter"):
             face = {"Exon": color_exon, "Marker": color_marker, "Promoter": color_promoter}[kind]
             d = geo.get("arrow_dir", 1)
-            # 잘리지 않은 끝쪽 exon만 화살촉으로
+            # 화살표 끝이 표시 범위 안에 있으면 화살촉을 그린다
             tip_ok = geo.get("arrow") and (e <= final_end if d == 1 else s >= final_start)
             if tip_ok:
                 head_h = box_h * exon_head_ratio
