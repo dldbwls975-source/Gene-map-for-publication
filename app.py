@@ -1,5 +1,8 @@
 import json
 import re
+import hashlib
+import zipfile
+from pathlib import Path
 from io import StringIO, BytesIO
 
 import matplotlib
@@ -86,6 +89,8 @@ ACTIVE_FONT = setup_font()
 # ============================================================
 PRESET_DEFAULTS = {
     # 텍스트
+    "wt_label": "WT allele",
+    "mut_label": "Mutant allele",
     "text_color": "#000000",
     "label_font_size": 11,
     "marker_font_size": 9,
@@ -177,8 +182,8 @@ with st.sidebar:
             "`**굵게**` · `*기울임*` · `^위첨자^` · `~아래첨자~`\n\n"
             "**조합 가능:** `***굵은기울임***`, `**car1^Δ^**`, `*p~TEF1~*`"
         )
-        wt_label = st.text_input("WT 라벨", "", placeholder="예: WT")
-        mut_label = st.text_input("Mutant 라벨", "", placeholder="예: *car1*Δ")
+        wt_label = st.text_input("WT 라벨", key="wt_label")
+        mut_label = st.text_input("Mutant 라벨", key="mut_label")
         text_color = st.color_picker("텍스트 색상", key="text_color")
         label_font_size = st.slider("라벨 (WT/Mut)", 6, 24, key="label_font_size")
         marker_font_size = st.slider("Marker / Promoter", 6, 20, key="marker_font_size")
@@ -407,7 +412,8 @@ def parse_to_dataframe(file_content, is_mutant, rules_key):
             "시작": start, "종료": end, "방향": strand,
         })
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=["표시", "이름", "종류", "화살표", "길이_배수",
+                                     "Y_띄우기_mm", "위로향함", "시작", "종료", "방향"])
     if not df.empty:
         df = df.sort_values("시작").reset_index(drop=True)
     return df, len(record), notes
@@ -636,12 +642,15 @@ def plan_track(df, cfg):
             )
             y_out = box_bottom + 0.6 * MM
             label_bottom = y_out + max_tier * (th + 0.6 * MM) + th
-            # 아래쪽 효소/프라이머/Probe는 라벨 밴드 아래로 옮겨 겹침을 피한다.
-            for geo in plan.values():
-                if geo["side"] == -1 and geo["kind"] in ("Enzyme", "Primer", "Probe"):
-                    geo["y0"] += label_bottom
-                    geo["y1"] += label_bottom
-            extent[-1] += label_bottom
+            # 효소 눈금은 시퀀스 선에 붙여 둔다. Probe만 필요할 때 간격을 확보한다.
+            bottom_probes = [geo for geo in plan.values()
+                             if geo["side"] == -1 and geo["kind"] == "Probe"]
+            probe_shift = max(0.0, label_bottom + 1.2 * MM
+                              - min(geo["y0"] for geo in bottom_probes)) if bottom_probes else 0.0
+            for geo in bottom_probes:
+                geo["y0"] += probe_shift
+                geo["y1"] += probe_shift
+            extent[-1] = max(extent[-1] + probe_shift, label_bottom)
         else:
             side_out = 1 if extent[1] <= extent[-1] else -1
             y_out = extent[side_out] + 1.2 * MM
@@ -653,11 +662,397 @@ def plan_track(df, cfg):
     return plan, extent, long_names
 
 
+def render_gene_map(wt_df, mut_df, wt_len, mut_len, hr_edited, settings,
+                    wt_label="WT allele", mut_label="Mutant allele"):
+    """단일/일괄 작업에서 같은 레이아웃으로 Figure를 생성한다."""
+    trim_left = settings["trim_left"]
+    trim_right = settings["trim_right"]
+    box_h_mm = settings["box_h_mm"]
+    probe_h_mm = settings["probe_h_mm"]
+    enzyme_tick_mm = settings["enzyme_tick_mm"]
+    primer_stem_mm = settings["primer_stem_mm"]
+    label_area_mm = settings["label_area_mm"]
+    fig_width = settings["fig_width"]
+    marker_font_size = settings["marker_font_size"]
+    enzyme_font_size = settings["enzyme_font_size"]
+    primer_font_size = settings["primer_font_size"]
+    arrow_mm = settings["arrow_mm"]
+    dedup_enzyme = settings["dedup_enzyme"]
+    auto_stagger = settings["auto_stagger"]
+    exon_arrow = settings["exon_arrow"]
+    exon_head_ratio = settings["exon_head_ratio"]
+    track_gap_mm = settings["track_gap_mm"]
+    show_scalebar = settings["show_scalebar"]
+    scalebar_lw = settings["scalebar_lw"]
+    label_font_size = settings["label_font_size"]
+    color_line = settings["color_line"]
+    line_width = settings["line_width"]
+    text_color = settings["text_color"]
+    color_enzyme = settings["color_enzyme"]
+    color_exon = settings["color_exon"]
+    color_marker = settings["color_marker"]
+    color_promoter = settings["color_promoter"]
+    color_probe = settings["color_probe"]
+    show_hr = settings["show_hr"]
+    scalebar_bp = settings["scalebar_bp"]
+    scalebar_color = settings["scalebar_color"]
+
+    # ---------- 표시 범위 ----------
+    all_visible = pd.concat([wt_df[wt_df["표시"] == True], mut_df[mut_df["표시"] == True]])
+    if not all_visible.empty:
+        data_start = int(all_visible["시작"].min())
+        data_end = int(all_visible["종료"].max())
+    else:
+        data_start, data_end = 0, max(wt_len, mut_len)
+
+    pad = max(int((data_end - data_start) * 0.02), 50)
+    final_start = max(0, data_start - pad) + trim_left
+    final_end = (data_end + pad) - trim_right
+    if final_end <= final_start:
+        final_end = final_start + 100
+    span = final_end - final_start
+
+    # ---------- 좌표계: x는 bp, y는 inch (축이 figure 전체를 채움) ----------
+    box_h = box_h_mm * MM
+    probe_h = probe_h_mm * MM
+    enzyme_tick = enzyme_tick_mm * MM
+    primer_stem = primer_stem_mm * MM
+    label_area = label_area_mm * MM
+    right_pad = 0.12
+
+    draw_width = max(fig_width - label_area - right_pad, 1.0)
+    bp_per_inch = span / draw_width
+
+    cfg_common = dict(
+        span=span, bp_per_inch=bp_per_inch,
+        box_h=box_h, probe_h=probe_h,
+        enzyme_tick=enzyme_tick, primer_stem=primer_stem,
+        enzyme_font_size=enzyme_font_size, primer_font_size=primer_font_size,
+        marker_font_size=marker_font_size, arrow_mm=arrow_mm,
+        dedup_enzyme=dedup_enzyme, auto_stagger=auto_stagger, exon_arrow=exon_arrow,
+        head_ratio=exon_head_ratio,
+    )
+
+    wt_plan, wt_ext, wt_long = plan_track(wt_df, dict(cfg_common, out_side=1))
+    mut_plan, mut_ext, mut_long = plan_track(mut_df, dict(cfg_common, out_side=-1, outside_below=True))
+
+    gap = wt_ext[-1] + mut_ext[1] + track_gap_mm * MM
+    y_wt = 0.0
+    y_mut = -gap
+
+    y_top = y_wt + wt_ext[1]
+    y_bottom = y_mut - mut_ext[-1]
+
+    if show_scalebar:
+        y_top += 4 * MM + scalebar_lw / 72.0 + text_height(label_font_size)
+
+    # WT/Mutant 라벨이 트랙보다 크면 위아래 여유 확보
+    half_label = text_height(label_font_size) / 2.0
+    y_top = max(y_top, y_wt + half_label)
+    y_bottom = min(y_bottom, y_mut - half_label)
+
+    margin = 2 * MM
+    y_lo, y_hi = y_bottom - margin, y_top + margin
+    fig_height = max(y_hi - y_lo, 0.8)
+
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(final_start - label_area * bp_per_inch, final_end + right_pad * bp_per_inch)
+    ax.set_ylim(y_lo, y_hi)
+    ax.axis("off")
+
+    Z_LINE, Z_HR, Z_BOX, Z_MARK = 1, 2, 5, 8
+
+    for y in (y_wt, y_mut):
+        ax.plot([final_start, final_end], [y, y], color=color_line, lw=line_width,
+                solid_capstyle="butt", zorder=Z_LINE)
+
+    ax.text(final_start - 2 * MM * bp_per_inch, y_wt, format_text(wt_label),
+            ha="right", va="center", color=text_color, fontsize=label_font_size)
+    ax.text(final_start - 2 * MM * bp_per_inch, y_mut, format_text(mut_label),
+            ha="right", va="center", color=text_color, fontsize=label_font_size)
+
+
+    def draw_track(track_y, df, plan):
+        dropped = []
+        for idx, row in df[df["표시"] == True].iterrows():
+            geo = plan.get(idx)
+            if geo is None:
+                continue
+            s, e = float(row["시작"]), float(row["종료"])
+            if e <= final_start or s >= final_end:
+                dropped.append(str(row["이름"]))
+                continue
+            kind = geo["kind"]
+            name = format_text(row["이름"])
+
+            if kind in ("Enzyme", "Primer"):
+                if s < final_start or s > final_end:
+                    dropped.append(str(row["이름"]))
+                    continue
+                side = geo["side"]
+                y0 = track_y + side * geo["y0"]
+                y1 = track_y + side * geo["y1"]
+                va = "bottom" if side == 1 else "top"
+
+                xlab = geo.get("xlab", s)
+                xtip = geo.get("xtip", s)
+                y_text = y1 + side * 1.0 * MM
+
+                if kind == "Enzyme":
+                    ax.plot([s, s], [y0, y1], color=color_enzyme, lw=1.0,
+                            solid_capstyle="butt", zorder=Z_BOX - 1)
+                    if geo["label"]:
+                        ax.text(xlab, y_text, name, color=color_enzyme, ha="center", va=va,
+                                fontsize=enzyme_font_size, zorder=Z_MARK)
+                else:
+                    dx = geo.get("dx", 2.5 * MM * bp_per_inch) * (1 if row["방향"] == 1 else -1)
+                    ax.plot([s, s], [y0, y1], color=color_line, lw=0.9,
+                            solid_capstyle="butt", zorder=Z_BOX - 1)
+                    ax.annotate("", xy=(s + dx, y1), xytext=(s, y1),
+                                arrowprops=dict(arrowstyle="-|>", color=color_line,
+                                                lw=0.9, mutation_scale=7,
+                                                shrinkA=0, shrinkB=0),
+                                zorder=Z_BOX - 1)
+                    ax.text(xlab, y_text, name, ha="center", va=va,
+                            color=text_color, fontsize=primer_font_size, zorder=Z_MARK)
+                continue
+
+            # 박스류 — 표시 범위 경계에 맞춰 자르되, 최소 폭은 보장해서 사라지지 않게
+            sx, ex = max(s, final_start), min(e, final_end)
+            w = max(ex - sx, 0.35 * MM * bp_per_inch)
+
+            if kind == "Probe":
+                side = geo["side"]
+                y0 = track_y + side * geo["y0"]
+                y1 = track_y + side * geo["y1"]
+                lo, hi = min(y0, y1), max(y0, y1)
+                fs = geo.get("fontsize", marker_font_size)
+                ax.add_patch(patches.Rectangle((sx, lo), w, hi - lo,
+                                               facecolor=color_probe, edgecolor="none",
+                                               zorder=Z_BOX))
+                # 박스 폭이나 트랙의 위/아래 위치와 관계없이 이름은 항상 박스 아래.
+                ax.text(sx + w / 2, lo - 0.8 * MM, name, ha="center", va="top",
+                        fontsize=fs, color=text_color, zorder=Z_MARK)
+
+            elif kind in ("Exon", "Marker", "Promoter"):
+                face = {"Exon": color_exon, "Marker": color_marker, "Promoter": color_promoter}[kind]
+                d = geo.get("arrow_dir", 1)
+                # 화살표 끝이 표시 범위 안에 있으면 화살촉을 그린다
+                tip_ok = geo.get("arrow") and (e <= final_end if d == 1 else s >= final_start)
+                if tip_ok:
+                    head_h = box_h * exon_head_ratio
+                    tip = geo.get("tip") or min(head_h * bp_per_inch, w * 0.45)
+                    lo, hi = track_y - box_h / 2, track_y + box_h / 2
+                    hlo, hhi = track_y - head_h / 2, track_y + head_h / 2
+                    if d == 1:
+                        nx = sx + w - tip
+                        pts = [(sx, lo), (nx, lo), (nx, hlo), (sx + w, track_y),
+                               (nx, hhi), (nx, hi), (sx, hi)]
+                    else:
+                        nx = sx + tip
+                        pts = [(sx + w, lo), (nx, lo), (nx, hlo), (sx, track_y),
+                               (nx, hhi), (nx, hi), (sx + w, hi)]
+                    ax.add_patch(patches.Polygon(pts, closed=True, facecolor=face,
+                                                 edgecolor="none", zorder=Z_BOX))
+                else:
+                    ax.add_patch(patches.Rectangle((sx, track_y - box_h / 2), w, box_h,
+                                                   facecolor=face, edgecolor="none", zorder=Z_BOX))
+                if kind == "Exon":
+                    continue
+                fs = geo.get("fontsize", marker_font_size)
+                if geo.get("outside"):
+                    side = geo["side"]
+                    ax.text(geo.get("xlab", sx + w / 2),
+                            track_y + side * geo.get("y_out", box_h / 2 + 1 * MM), name,
+                            ha="center", va="bottom" if side == 1 else "top",
+                            fontsize=fs, color=text_color, zorder=Z_MARK)
+                else:
+                    inner = "#000000" if kind in ("Marker", "Promoter") else "#FFFFFF"
+                    cx = sx + w / 2 - (d * geo.get("tip", 0.0) / 2 if tip_ok else 0.0)
+                    ax.text(cx, track_y, name, ha="center", va="center",
+                            fontsize=fs, color=inner, zorder=Z_MARK)
+        return dropped
+
+
+    dropped_wt = draw_track(y_wt, wt_df, wt_plan)
+    dropped_mut = draw_track(y_mut, mut_df, mut_plan)
+
+    # ---------- HR 점선 ----------
+    if show_hr:
+        for _, row in hr_edited.iterrows():
+            wt_k = str(row.get("WT_이름", "")).strip()
+            mut_k = str(row.get("Mutant_이름", "")).strip()
+            if not wt_k or not mut_k or wt_k.lower() == "nan" or mut_k.lower() == "nan":
+                continue
+            wm = wt_df[(wt_df["표시"] == True) & (wt_df["이름"] == wt_k)]
+            mm_ = mut_df[(mut_df["표시"] == True) & (mut_df["이름"] == mut_k)]
+            if wm.empty or mm_.empty:
+                continue
+            wx, mx = float(wm.iloc[0]["시작"]), float(mm_.iloc[0]["시작"])
+            if final_start <= wx <= final_end and final_start <= mx <= final_end:
+                ax.plot([wx, mx], [y_wt, y_mut], "--", color=color_line,
+                        lw=0.8, alpha=0.45, zorder=Z_HR)
+
+    # ---------- Scale bar ----------
+    if show_scalebar:
+        sb_y = y_hi - margin - text_height(label_font_size)
+        sb_x0, sb_x1 = final_start, final_start + scalebar_bp
+        ax.plot([sb_x0, sb_x1], [sb_y, sb_y], color=scalebar_color, lw=scalebar_lw,
+                solid_capstyle="butt", zorder=20)
+        sb_label = f"{scalebar_bp / 1000:g} kb" if scalebar_bp >= 1000 else f"{scalebar_bp} bp"
+        ax.text((sb_x0 + sb_x1) / 2, sb_y + 0.8 * MM, sb_label, ha="center", va="bottom",
+                color=scalebar_color, fontsize=label_font_size, zorder=20)
+
+    return fig, {"fig_height": fig_height, "dropped_wt": dropped_wt,
+                 "dropped_mut": dropped_mut, "wt_long": wt_long, "mut_long": mut_long}
+
+
+# ============================================================
+# 일괄 작업 — 파일 짝짓기와 그림 ZIP 생성
+# ============================================================
+def decode_genbank_bytes(raw):
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("GenBank 파일을 읽을 수 없습니다.")
+
+
+def default_hr_pairs():
+    return pd.DataFrame({"WT_이름": ["L1", "L2", "R1", "R2"],
+                         "Mutant_이름": ["L2", "L1", "R2", "R1"]})
+
+
+def file_pair_key(filename):
+    """파일명만 사용해 후보를 추천한다. 모호한 짝은 선택하지 않는다."""
+    stem = Path(filename).stem
+    locus = re.search(r"CNAG[_ -]?(\d+)", stem, re.IGNORECASE)
+    if locus:
+        return "CNAG_" + locus.group(1)
+    words = re.split(r"[\s_\-().]+", stem.upper())
+    ignored = {"WT", "MUT", "MUTANT", "ALLELE", "WILD", "TYPE"}
+    return "_".join(word for word in words if word and word not in ignored)
+
+
+def suggest_batch_pairs(wt_files, mutant_files, wt_label="WT allele", mut_label="Mutant allele"):
+    by_key = {}
+    for uploaded in wt_files:
+        by_key.setdefault(file_pair_key(uploaded.name), []).append(uploaded.name)
+    rows = []
+    for uploaded in mutant_files:
+        candidates = by_key.get(file_pair_key(uploaded.name), [])
+        candidate = candidates[0] if len(candidates) == 1 else ""
+        rows.append({"출력": True, "WT 파일": candidate, "Mutant 파일": uploaded.name,
+                     "출력 이름": Path(uploaded.name).stem,
+                     "WT 라벨": wt_label, "Mutant 라벨": mut_label})
+    return pd.DataFrame(rows, columns=["출력", "WT 파일", "Mutant 파일", "출력 이름", "WT 라벨", "Mutant 라벨"])
+
+
+def upload_lookup(uploaded_files):
+    lookup = {}
+    for uploaded in uploaded_files:
+        if uploaded.name in lookup:
+            raise ValueError(f"파일 이름이 중복됩니다: {uploaded.name}. 서로 다른 이름으로 바꿔 올려주세요.")
+        lookup[uploaded.name] = uploaded
+    return lookup
+
+
+def safe_output_stem(value, fallback):
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(value)).strip(" .")
+    if not name or name.lower() == "nan":
+        return fallback
+    return name[:150]
+
+
+def batch_signature(wt_files, mutant_files, pair_df, settings, formats, hr_pairs, rules_key):
+    digest = hashlib.sha256()
+    for role, files in (("WT", wt_files), ("Mutant", mutant_files)):
+        for uploaded in files:
+            digest.update(role.encode())
+            digest.update(uploaded.name.encode("utf-8"))
+            digest.update(hashlib.sha256(uploaded.getvalue()).digest())
+    digest.update(pair_df.to_json(force_ascii=False).encode("utf-8"))
+    digest.update(hr_pairs.to_json(force_ascii=False).encode("utf-8"))
+    digest.update(json.dumps([settings, formats, rules_key], ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def build_batch_zip(pair_df, wt_files, mutant_files, rules_key, settings, formats,
+                    hr_pairs=None, progress_callback=None):
+    wt_lookup, mut_lookup = upload_lookup(wt_files), upload_lookup(mutant_files)
+    formats = [str(fmt).lower() for fmt in formats]
+    if not formats or any(fmt not in {"png", "svg", "pdf"} for fmt in formats):
+        raise ValueError("PNG, SVG, PDF 중 하나 이상의 형식을 선택해 주세요.")
+    if hr_pairs is None:
+        hr_pairs = default_hr_pairs()
+    selected = pair_df[pair_df["출력"] == True]
+    buffer, reports, used_names, parsed = BytesIO(), [], set(), {}
+    success = 0
+
+    def parse_file(uploaded, mutant):
+        key = (mutant, uploaded.name)
+        if key not in parsed:
+            parsed[key] = parse_to_dataframe(decode_genbank_bytes(uploaded.getvalue()), mutant, rules_key)
+        return parsed[key]
+
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for order, (_, row) in enumerate(selected.iterrows(), 1):
+            fig = None
+            report = {"WT 파일": row.get("WT 파일", ""), "Mutant 파일": row.get("Mutant 파일", ""),
+                      "출력 이름": row.get("출력 이름", ""), "상태": "실패", "내용": ""}
+            try:
+                wt_name, mut_name = str(row.get("WT 파일", "")), str(row.get("Mutant 파일", ""))
+                if wt_name not in wt_lookup or mut_name not in mut_lookup:
+                    raise ValueError("WT·Mutant 파일의 짝을 선택해 주세요.")
+                wt_df, wt_len, wt_notes = parse_file(wt_lookup[wt_name], False)
+                mut_df, mut_len, mut_notes = parse_file(mut_lookup[mut_name], True)
+                fig, info = render_gene_map(
+                    wt_df, mut_df, wt_len, mut_len, hr_pairs, settings,
+                    str(row.get("WT 라벨", "WT allele")), str(row.get("Mutant 라벨", "Mutant allele")))
+                stem = safe_output_stem(row.get("출력 이름", ""), f"design_{order:03d}")
+                root, suffix = stem, 2
+                while stem.casefold() in used_names:
+                    stem = f"{root}_{suffix}"
+                    suffix += 1
+                # 한 디자인의 모든 형식이 생성된 뒤 ZIP에 추가한다.
+                entries = []
+                for fmt in formats:
+                    output = BytesIO()
+                    kwargs = {"dpi": settings["dpi_setting"]} if fmt == "png" else {}
+                    fig.savefig(output, format=fmt, bbox_inches="tight", pad_inches=0.05,
+                                facecolor="white", **kwargs)
+                    entries.append((f"{stem}/{stem}.{fmt}", output.getvalue()))
+                for name, content in entries:
+                    archive.writestr(name, content)
+                used_names.add(stem.casefold())
+                success += 1
+                warnings = list(wt_notes) + list(mut_notes)
+                clipped = info["dropped_wt"] + info["dropped_mut"]
+                if clipped:
+                    warnings.append("표시 범위 밖: " + ", ".join(clipped))
+                if info["wt_long"] or info["mut_long"]:
+                    warnings.append("박스 밖 라벨: " + ", ".join(info["wt_long"] + info["mut_long"]))
+                report.update({"출력 이름": stem, "상태": "완료", "내용": " / ".join(warnings)})
+            except Exception as error:
+                report["내용"] = str(error)
+            finally:
+                if fig is not None:
+                    plt.close(fig)
+            reports.append(report)
+            if progress_callback:
+                progress_callback(order, len(selected))
+        report_df = pd.DataFrame(reports, columns=["WT 파일", "Mutant 파일", "출력 이름", "상태", "내용"])
+        archive.writestr("processing_report.csv", report_df.to_csv(index=False).encode("utf-8-sig"))
+    return buffer.getvalue(), report_df, success
+
+
 # ============================================================
 # 메인
 # ============================================================
-tab_upload, tab_edit, tab_hr, tab_view, tab_free = st.tabs(
-    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드", "✍️ 직접 편집"]
+tab_upload, tab_edit, tab_hr, tab_view, tab_free, tab_batch = st.tabs(
+    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드", "✍️ 직접 편집", "📦 일괄 작업"]
 )
 
 with tab_upload:
@@ -666,6 +1061,87 @@ with tab_upload:
         wt_file = st.file_uploader("WT GenBank (.gb)", type=["gb", "gbk"])
     with c2:
         mutant_file = st.file_uploader("Mutant GenBank (.gb)", type=["gb", "gbk"])
+
+rules_key = (
+    split_rule(rule_marker), split_rule(rule_promoter),
+    split_rule(rule_probe), split_rule(rule_primer),
+    int(rule_enzyme_max), int(rule_primer_max), bool(hide_unnamed),
+)
+
+# 일괄 작업은 단일 파일 업로드 없이도 사용할 수 있다.
+with tab_batch:
+    st.caption("WT·Mutant 파일을 여러 개 올리고 아래 표에서 짝과 라벨을 확인하세요. 현재 사이드바의 색상·크기·간격이 모든 그림에 적용됩니다.")
+    batch_c1, batch_c2 = st.columns(2)
+    with batch_c1:
+        batch_wt = st.file_uploader("WT 파일 여러 개", type=["gb", "gbk"],
+                                    accept_multiple_files=True, key="batch_wt")
+    with batch_c2:
+        batch_mut = st.file_uploader("Mutant 파일 여러 개", type=["gb", "gbk"],
+                                     accept_multiple_files=True, key="batch_mut")
+    if batch_wt and batch_mut:
+        try:
+            upload_lookup(batch_wt)
+            upload_lookup(batch_mut)
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            suggested = suggest_batch_pairs(batch_wt, batch_mut, wt_label, mut_label)
+            st.caption("파일명의 CNAG 번호 또는 공통 이름이 같은 짝을 추천합니다. WT 후보가 여러 개이거나 이름이 다르면 빈칸에서 직접 선택하세요. 같은 WT를 여러 Mutant와 짝지을 수 있습니다.")
+            pair_editor_key = "batch_pairs_" + hashlib.sha256(
+                json.dumps([[f.name for f in batch_wt], [f.name for f in batch_mut]], ensure_ascii=False).encode("utf-8")
+            ).hexdigest()[:12]
+            batch_pairs = st.data_editor(suggested, hide_index=True, use_container_width=True,
+                key=pair_editor_key, column_config={
+                    "출력": st.column_config.CheckboxColumn("출력"),
+                    "WT 파일": st.column_config.SelectboxColumn("WT 파일", options=[""] + [f.name for f in batch_wt], required=True),
+                    "Mutant 파일": st.column_config.TextColumn("Mutant 파일", disabled=True),
+                    "출력 이름": st.column_config.TextColumn("출력 이름", required=True),
+                    "WT 라벨": st.column_config.TextColumn("WT 라벨"),
+                    "Mutant 라벨": st.column_config.TextColumn("Mutant 라벨"),
+                })
+            batch_formats = st.multiselect("출력 형식", ["PNG", "SVG", "PDF"],
+                                           default=["PNG", "SVG", "PDF"], key="batch_formats")
+            with st.expander("일괄 작업의 HR 점선 연결"):
+                st.caption("아래 연결을 모든 파일 짝에 적용합니다. 해당 이름이 없는 그림에서는 그 연결을 건너뜁니다.")
+                batch_hr = st.data_editor(default_hr_pairs(), num_rows="dynamic", hide_index=True,
+                                          use_container_width=True, key="batch_hr")
+            batch_settings = {key: st.session_state[key] for key in PRESET_DEFAULTS}
+            signature = batch_signature(batch_wt, batch_mut, batch_pairs, batch_settings,
+                                        batch_formats, batch_hr, rules_key)
+            selected_pairs = batch_pairs[batch_pairs["출력"] == True]
+            if st.button("📦 선택한 디자인 일괄 생성", key="batch_generate"):
+                if selected_pairs.empty:
+                    st.warning("출력할 항목을 하나 이상 선택해 주세요.")
+                elif not batch_formats:
+                    st.warning("출력 형식을 하나 이상 선택해 주세요.")
+                elif any(str(name) not in {f.name for f in batch_wt} for name in selected_pairs["WT 파일"]):
+                    st.warning("선택한 모든 행에서 WT 파일의 짝을 먼저 지정해 주세요.")
+                else:
+                    progress = st.progress(0.0, text="디자인 생성 중...")
+                    try:
+                        data, report, completed = build_batch_zip(
+                            batch_pairs, batch_wt, batch_mut, rules_key, batch_settings,
+                            batch_formats, batch_hr,
+                            progress_callback=lambda done, total: progress.progress(
+                                done / total, text=f"디자인 생성: {done}/{total}"))
+                        st.session_state["batch_result"] = (signature, data, report, completed)
+                    except Exception as error:
+                        st.error(f"일괄 작업 오류: {error}")
+                    finally:
+                        progress.empty()
+            result = st.session_state.get("batch_result")
+            if result and result[0] == signature:
+                _, zip_data, report, completed = result
+                if completed:
+                    st.success(f"{completed}개 디자인 생성 완료. 각 디자인 폴더에 선택한 형식이 저장됩니다.")
+                    st.download_button("📥 디자인 전체 ZIP 다운로드", data=zip_data,
+                        file_name="allele_designs.zip", mime="application/zip", key="batch_download")
+                if (report["상태"] == "실패").any():
+                    st.warning("일부 파일을 처리하지 못했습니다. 아래 표의 내용을 확인해 주세요.")
+                st.dataframe(report, hide_index=True, use_container_width=True)
+    else:
+        st.info("위의 WT·Mutant 업로드 영역에 각각 여러 GenBank 파일을 선택해 주세요.")
+
 
 if not (wt_file and mutant_file):
     with tab_edit:
@@ -678,15 +1154,10 @@ if not (wt_file and mutant_file):
         st.info("파일 업로드 후 사용할 수 있습니다.")
     st.stop()
 
-rules_key = (
-    split_rule(rule_marker), split_rule(rule_promoter),
-    split_rule(rule_probe), split_rule(rule_primer),
-    int(rule_enzyme_max), int(rule_primer_max), bool(hide_unnamed),
-)
 wt_df_raw, wt_len, wt_notes = parse_to_dataframe(
-    wt_file.getvalue().decode("utf-8"), False, rules_key)
+    decode_genbank_bytes(wt_file.getvalue()), False, rules_key)
 mut_df_raw, mut_len, mut_notes = parse_to_dataframe(
-    mutant_file.getvalue().decode("utf-8"), True, rules_key)
+    decode_genbank_bytes(mutant_file.getvalue()), True, rules_key)
 
 editor_config = {
     "표시": st.column_config.CheckboxColumn("표시"),
@@ -735,216 +1206,15 @@ with tab_edit:
 
 with tab_hr:
     st.caption("편집한 '이름'을 입력하면 X자 점선으로 연결합니다.")
-    default_hr = pd.DataFrame({"WT_이름": ["L1", "L2", "R1", "R2"],
-                               "Mutant_이름": ["L2", "L1", "R2", "R1"]})
+    default_hr = default_hr_pairs()
     hr_edited = st.data_editor(default_hr, num_rows="dynamic", hide_index=True, key="hr_editor")
 
-# ---------- 표시 범위 ----------
-all_visible = pd.concat([wt_df[wt_df["표시"] == True], mut_df[mut_df["표시"] == True]])
-if not all_visible.empty:
-    data_start = int(all_visible["시작"].min())
-    data_end = int(all_visible["종료"].max())
-else:
-    data_start, data_end = 0, max(wt_len, mut_len)
-
-pad = max(int((data_end - data_start) * 0.02), 50)
-final_start = max(0, data_start - pad) + trim_left
-final_end = (data_end + pad) - trim_right
-if final_end <= final_start:
-    final_end = final_start + 100
-span = final_end - final_start
-
-# ---------- 좌표계: x는 bp, y는 inch (축이 figure 전체를 채움) ----------
-box_h = box_h_mm * MM
-probe_h = probe_h_mm * MM
-enzyme_tick = enzyme_tick_mm * MM
-primer_stem = primer_stem_mm * MM
-label_area = label_area_mm * MM
-right_pad = 0.12
-
-draw_width = max(fig_width - label_area - right_pad, 1.0)
-bp_per_inch = span / draw_width
-
-cfg_common = dict(
-    span=span, bp_per_inch=bp_per_inch,
-    box_h=box_h, probe_h=probe_h,
-    enzyme_tick=enzyme_tick, primer_stem=primer_stem,
-    enzyme_font_size=enzyme_font_size, primer_font_size=primer_font_size,
-    marker_font_size=marker_font_size, arrow_mm=arrow_mm,
-    dedup_enzyme=dedup_enzyme, auto_stagger=auto_stagger, exon_arrow=exon_arrow,
-    head_ratio=exon_head_ratio,
-)
-
-wt_plan, wt_ext, wt_long = plan_track(wt_df, dict(cfg_common, out_side=1))
-mut_plan, mut_ext, mut_long = plan_track(mut_df, dict(cfg_common, out_side=-1, outside_below=True))
-
-gap = wt_ext[-1] + mut_ext[1] + track_gap_mm * MM
-y_wt = 0.0
-y_mut = -gap
-
-y_top = y_wt + wt_ext[1]
-y_bottom = y_mut - mut_ext[-1]
-
-if show_scalebar:
-    y_top += 4 * MM + scalebar_lw / 72.0 + text_height(label_font_size)
-
-# WT/Mutant 라벨이 트랙보다 크면 위아래 여유 확보
-half_label = text_height(label_font_size) / 2.0
-y_top = max(y_top, y_wt + half_label)
-y_bottom = min(y_bottom, y_mut - half_label)
-
-margin = 2 * MM
-y_lo, y_hi = y_bottom - margin, y_top + margin
-fig_height = max(y_hi - y_lo, 0.8)
-
-fig = plt.figure(figsize=(fig_width, fig_height))
-ax = fig.add_axes([0, 0, 1, 1])
-ax.set_xlim(final_start - label_area * bp_per_inch, final_end + right_pad * bp_per_inch)
-ax.set_ylim(y_lo, y_hi)
-ax.axis("off")
-
-Z_LINE, Z_HR, Z_BOX, Z_MARK = 1, 2, 5, 8
-
-for y in (y_wt, y_mut):
-    ax.plot([final_start, final_end], [y, y], color=color_line, lw=line_width,
-            solid_capstyle="butt", zorder=Z_LINE)
-
-ax.text(final_start - 2 * MM * bp_per_inch, y_wt, format_text(wt_label),
-        ha="right", va="center", color=text_color, fontsize=label_font_size)
-ax.text(final_start - 2 * MM * bp_per_inch, y_mut, format_text(mut_label),
-        ha="right", va="center", color=text_color, fontsize=label_font_size)
-
-
-def draw_track(track_y, df, plan):
-    dropped = []
-    for idx, row in df[df["표시"] == True].iterrows():
-        geo = plan.get(idx)
-        if geo is None:
-            continue
-        s, e = float(row["시작"]), float(row["종료"])
-        if e <= final_start or s >= final_end:
-            dropped.append(str(row["이름"]))
-            continue
-        kind = geo["kind"]
-        name = format_text(row["이름"])
-
-        if kind in ("Enzyme", "Primer"):
-            if s < final_start or s > final_end:
-                dropped.append(str(row["이름"]))
-                continue
-            side = geo["side"]
-            y0 = track_y + side * geo["y0"]
-            y1 = track_y + side * geo["y1"]
-            va = "bottom" if side == 1 else "top"
-
-            xlab = geo.get("xlab", s)
-            xtip = geo.get("xtip", s)
-            y_text = y1 + side * 1.0 * MM
-
-            if kind == "Enzyme":
-                ax.plot([s, s], [y0, y1], color=color_enzyme, lw=1.0,
-                        solid_capstyle="butt", zorder=Z_BOX - 1)
-                if geo["label"]:
-                    ax.text(xlab, y_text, name, color=color_enzyme, ha="center", va=va,
-                            fontsize=enzyme_font_size, zorder=Z_MARK)
-            else:
-                dx = geo.get("dx", 2.5 * MM * bp_per_inch) * (1 if row["방향"] == 1 else -1)
-                ax.plot([s, s], [y0, y1], color=color_line, lw=0.9,
-                        solid_capstyle="butt", zorder=Z_BOX - 1)
-                ax.annotate("", xy=(s + dx, y1), xytext=(s, y1),
-                            arrowprops=dict(arrowstyle="-|>", color=color_line,
-                                            lw=0.9, mutation_scale=7,
-                                            shrinkA=0, shrinkB=0),
-                            zorder=Z_BOX - 1)
-                ax.text(xlab, y_text, name, ha="center", va=va,
-                        color=text_color, fontsize=primer_font_size, zorder=Z_MARK)
-            continue
-
-        # 박스류 — 표시 범위 경계에 맞춰 자르되, 최소 폭은 보장해서 사라지지 않게
-        sx, ex = max(s, final_start), min(e, final_end)
-        w = max(ex - sx, 0.35 * MM * bp_per_inch)
-
-        if kind == "Probe":
-            side = geo["side"]
-            y0 = track_y + side * geo["y0"]
-            y1 = track_y + side * geo["y1"]
-            lo, hi = min(y0, y1), max(y0, y1)
-            fs = geo.get("fontsize", marker_font_size)
-            ax.add_patch(patches.Rectangle((sx, lo), w, hi - lo,
-                                           facecolor=color_probe, edgecolor="none",
-                                           zorder=Z_BOX))
-            # 박스 폭이나 트랙의 위/아래 위치와 관계없이 이름은 항상 박스 아래.
-            ax.text(sx + w / 2, lo - 0.8 * MM, name, ha="center", va="top",
-                    fontsize=fs, color=text_color, zorder=Z_MARK)
-
-        elif kind in ("Exon", "Marker", "Promoter"):
-            face = {"Exon": color_exon, "Marker": color_marker, "Promoter": color_promoter}[kind]
-            d = geo.get("arrow_dir", 1)
-            # 화살표 끝이 표시 범위 안에 있으면 화살촉을 그린다
-            tip_ok = geo.get("arrow") and (e <= final_end if d == 1 else s >= final_start)
-            if tip_ok:
-                head_h = box_h * exon_head_ratio
-                tip = geo.get("tip") or min(head_h * bp_per_inch, w * 0.45)
-                lo, hi = track_y - box_h / 2, track_y + box_h / 2
-                hlo, hhi = track_y - head_h / 2, track_y + head_h / 2
-                if d == 1:
-                    nx = sx + w - tip
-                    pts = [(sx, lo), (nx, lo), (nx, hlo), (sx + w, track_y),
-                           (nx, hhi), (nx, hi), (sx, hi)]
-                else:
-                    nx = sx + tip
-                    pts = [(sx + w, lo), (nx, lo), (nx, hlo), (sx, track_y),
-                           (nx, hhi), (nx, hi), (sx + w, hi)]
-                ax.add_patch(patches.Polygon(pts, closed=True, facecolor=face,
-                                             edgecolor="none", zorder=Z_BOX))
-            else:
-                ax.add_patch(patches.Rectangle((sx, track_y - box_h / 2), w, box_h,
-                                               facecolor=face, edgecolor="none", zorder=Z_BOX))
-            if kind == "Exon":
-                continue
-            fs = geo.get("fontsize", marker_font_size)
-            if geo.get("outside"):
-                side = geo["side"]
-                ax.text(geo.get("xlab", sx + w / 2),
-                        track_y + side * geo.get("y_out", box_h / 2 + 1 * MM), name,
-                        ha="center", va="bottom" if side == 1 else "top",
-                        fontsize=fs, color=text_color, zorder=Z_MARK)
-            else:
-                inner = "#000000" if kind in ("Marker", "Promoter") else "#FFFFFF"
-                cx = sx + w / 2 - (d * geo.get("tip", 0.0) / 2 if tip_ok else 0.0)
-                ax.text(cx, track_y, name, ha="center", va="center",
-                        fontsize=fs, color=inner, zorder=Z_MARK)
-    return dropped
-
-
-dropped_wt = draw_track(y_wt, wt_df, wt_plan)
-dropped_mut = draw_track(y_mut, mut_df, mut_plan)
-
-# ---------- HR 점선 ----------
-if show_hr:
-    for _, row in hr_edited.iterrows():
-        wt_k = str(row.get("WT_이름", "")).strip()
-        mut_k = str(row.get("Mutant_이름", "")).strip()
-        if not wt_k or not mut_k or wt_k.lower() == "nan" or mut_k.lower() == "nan":
-            continue
-        wm = wt_df[(wt_df["표시"] == True) & (wt_df["이름"] == wt_k)]
-        mm_ = mut_df[(mut_df["표시"] == True) & (mut_df["이름"] == mut_k)]
-        if wm.empty or mm_.empty:
-            continue
-        wx, mx = float(wm.iloc[0]["시작"]), float(mm_.iloc[0]["시작"])
-        if final_start <= wx <= final_end and final_start <= mx <= final_end:
-            ax.plot([wx, mx], [y_wt, y_mut], "--", color=color_line,
-                    lw=0.8, alpha=0.45, zorder=Z_HR)
-
-# ---------- Scale bar ----------
-if show_scalebar:
-    sb_y = y_hi - margin - text_height(label_font_size)
-    sb_x0, sb_x1 = final_start, final_start + scalebar_bp
-    ax.plot([sb_x0, sb_x1], [sb_y, sb_y], color=scalebar_color, lw=scalebar_lw,
-            solid_capstyle="butt", zorder=20)
-    sb_label = f"{scalebar_bp / 1000:g} kb" if scalebar_bp >= 1000 else f"{scalebar_bp} bp"
-    ax.text((sb_x0 + sb_x1) / 2, sb_y + 0.8 * MM, sb_label, ha="center", va="bottom",
-            color=scalebar_color, fontsize=label_font_size, zorder=20)
+figure_settings = {key: st.session_state[key] for key in PRESET_DEFAULTS}
+fig, figure_info = render_gene_map(
+    wt_df, mut_df, wt_len, mut_len, hr_edited, figure_settings, wt_label, mut_label)
+fig_height = figure_info["fig_height"]
+dropped_wt, dropped_mut = figure_info["dropped_wt"], figure_info["dropped_mut"]
+wt_long, mut_long = figure_info["wt_long"], figure_info["mut_long"]
 
 # ---------- 미리보기 & 다운로드 ----------
 with tab_view:
@@ -1155,4 +1425,6 @@ with tab_free:
     )
 
 
+plt.close(fig)
+# 세션이 계속 재실행돼도 Matplotlib Figure가 누적되지 않게 정리.
 plt.close(fig)
