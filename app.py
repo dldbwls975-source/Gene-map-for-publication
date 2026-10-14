@@ -1,4 +1,8 @@
 import json
+import base64
+import posixpath
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 import re
 import hashlib
 import zipfile
@@ -141,6 +145,102 @@ for _k, _v in PRESET_DEFAULTS.items():
 
 
 # ============================================================
+# 사용 가이드 Word 생성 — 별도 DOCX 파일이나 추가 패키지 없이 다운로드
+# ============================================================
+@st.cache_data
+def generate_usage_guide():
+    def paragraph(text, style="Normal"):
+        return ('<w:p><w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>'
+                '<w:r><w:t xml:space="preserve">' + xml_escape(text) + '</w:t></w:r></w:p>')
+    def heading(text):
+        result = paragraph(text, "Heading1")
+        if text in {"엑셀 입력 양식", "여러 디자인을 한 번에 출력하기"}:
+            result = result.replace("<w:pPr>", "<w:pPr><w:pageBreakBefore/>", 1)
+        return result
+    def table(headers, rows, widths):
+        cells = [headers] + rows
+        parts = ['<w:tbl><w:tblPr><w:tblW w:w="9972" w:type="dxa"/><w:tblBorders>']
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            parts.append('<w:' + edge + ' w:val="single" w:sz="4" w:color="D9D9D9"/>')
+        parts.append('</w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="120" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>')
+        for width in widths: parts.append('<w:gridCol w:w="' + str(width) + '"/>')
+        parts.append('</w:tblGrid>')
+        for index, row in enumerate(cells):
+            parts.append('<w:tr>' + ('<w:trPr><w:tblHeader/></w:trPr>' if index == 0 else ''))
+            for width, text in zip(widths, row):
+                fill = '233D59' if index == 0 else ('EDF3FA' if index % 2 == 1 else 'FFFFFF')
+                parts.append('<w:tc><w:tcPr><w:tcW w:w="' + str(width) + '" w:type="dxa"/><w:shd w:fill="' + fill + '"/><w:vAlign w:val="center"/></w:tcPr><w:p><w:pPr><w:spacing w:after="40"/></w:pPr><w:r><w:rPr><w:sz w:val="20"/>' + ('<w:b/><w:color w:val="FFFFFF"/>' if index == 0 else '') + '</w:rPr><w:t>' + xml_escape(str(text)) + '</w:t></w:r></w:p></w:tc>')
+            parts.append('</w:tr>')
+        parts.append('</w:tbl>')
+        return ''.join(parts)
+    page_break = ''
+    body = [paragraph("유전자 맵 스튜디오 사용 가이드", "Title"),
+        paragraph("WT와 Mutant의 GenBank 주석을 나란히 그려 PNG, SVG, PDF로 저장하는 도구입니다. 한 디자인을 직접 편집하거나, 엑셀에 파일 짝과 라벨 및 단어별 기울임을 입력하여 여러 그림을 일괄 출력할 수 있습니다."),
+        heading("한 디자인 만들기"),
+        paragraph("1. 파일 업로드 탭에서 WT와 Mutant의 .gb 또는 .gbk 파일을 각각 선택합니다."),
+        paragraph("2. 요소 편집 탭에서 표시 여부, 이름, 종류, 화살표 방향, 위아래 위치를 확인합니다. 화면에서 표시하는 좌표는 업로드 파일의 주석을 따릅니다."),
+        paragraph("3. HR 연결 탭에서 점선으로 연결할 이름을 지정합니다. 기본값은 L1과 L2를 서로 교차하여 연결하고 R1과 R2는 같은 이름끼리 연결합니다. 파일에 없는 이름은 연결하지 않습니다."),
+        paragraph("4. 미리보기 및 다운로드 탭에서 PNG, SVG, PDF 중 원하는 형식으로 저장합니다."),
+        heading("라벨과 글씨 서식"),
+        paragraph("왼쪽 이름의 기본값은 WT allele과 Mutant allele입니다. 사이드바에서 직접 바꾸거나 엑셀에서 파일 짝마다 지정할 수 있습니다. 엑셀에 일치하는 파일 짝이 있으면 엑셀의 라벨을 사용합니다."),
+        paragraph("수동 입력에서는 *기울임*, **굵게**, ***굵은기울임***을 사용합니다. ~아래첨자~와 ^위첨자^도 지원합니다. 예를 들어 P~CTR4~: MSS4는 CTR4를 아래첨자로 표시합니다."),
+        heading("박스와 이름 배치"),
+        paragraph("Marker는 각 주석의 strand 방향으로 화살표가 표시됩니다. 요소 편집에서 없음, 오른쪽 또는 왼쪽으로 바꿀 수 있습니다. 마지막 exon도 strand 방향의 화살표로 표시합니다."),
+        paragraph("Mutant에서 박스 안에 들어가지 않는 긴 Marker와 Promoter 이름은 박스 바로 아래에 표시합니다. 모든 Probe 이름은 박스의 폭과 관계없이 바로 아래에 표시합니다. 제한효소 눈금은 시퀀스 선에 붙여 둡니다."),
+        heading("크기와 색상"),
+        paragraph("사이드바에서 그림 너비, 왼쪽 라벨 공간, 글씨 크기, 색상, 박스 높이, 트랙 간격과 scale bar를 조절합니다. PNG의 DPI는 래스터 해상도입니다. SVG와 PDF는 벡터 형식으로 저장됩니다."),
+        page_break,
+        heading("엑셀 입력 양식"),
+        paragraph("엑셀 설정 탭에서 입력 양식을 내려받습니다. 예시 행의 파일명을 실제 파일명으로 바꾸고 Designs와 TextStyles를 작성한 뒤 같은 탭에 업로드합니다. 시트 이름과 첫 행의 열 이름은 그대로 유지합니다."),
+        heading("Designs 시트"),
+        table(["열", "입력 내용"], [
+            ["디자인 ID", "D001 등의 고유 ID. TextStyles와 연결하는 기준입니다."],
+            ["출력", "예는 출력, 아니오는 일괄 작업에서 제외합니다."],
+            ["WT 파일 / Mutant 파일", "GenBank 파일명을 확장자까지 정확하게 입력합니다."],
+            ["출력 이름", "ZIP 안의 폴더와 그림 파일 이름을 지정합니다."],
+            ["WT 라벨 / Mutant 라벨", "각 시퀀스 왼쪽에 표시할 이름을 지정합니다. 빈칸은 기본 라벨로 채웁니다."]], [2900,7072]),
+        heading("TextStyles 시트"),
+        table(["열", "입력 내용"], [
+            ["디자인 ID", "*는 모든 디자인, D001 등의 ID는 해당 디자인만 적용합니다."],
+            ["적용 대상", "전체, WT 라벨, Mutant 라벨, WT 내부, Mutant 내부 중 선택합니다."],
+            ["단어", "서식을 바꿀 글씨를 한 행에 하나씩 입력합니다."],
+            ["기울임", "예는 기울임, 아니오는 일반체입니다. 기존의 기울임도 해제할 수 있습니다."],
+            ["일치 방식", "부분 일치, 단어 일치, 전체 일치 중 선택합니다."]], [2900,7072]),
+        paragraph("부분 일치는 글씨 안에 포함된 부분만 바꿉니다. 단어 일치는 독립된 단어에 적용하며, 전체 일치는 글씨 전체가 같은 경우에만 적용합니다. 대소문자는 구분하지 않습니다."),
+        paragraph("예: 디자인 ID D001, 적용 대상 전체, 단어 CTR4, 기울임 예, 일치 방식 부분 일치로 입력하면 CTR4 promoter에서 CTR4만 기울어집니다. 아래첨자 CTR4에도 적용됩니다."),
+        paragraph("여러 규칙이 같은 글씨에 겹치면 TextStyles의 아래쪽 행이 우선합니다. 기울임 선택만 바뀌며 기존 굵기와 위아래첨자는 유지됩니다. $...$로 직접 입력한 수식에는 단어별 규칙을 적용하지 않습니다."),
+        page_break,
+        heading("여러 디자인을 한 번에 출력하기"),
+        paragraph("1. 엑셀 설정 탭에 작성한 양식을 업로드합니다. 양식 없이도 일괄 작업을 시작할 수 있습니다."),
+        paragraph("2. 일괄 작업 탭에서 WT 파일과 Mutant 파일을 각각 여러 개 선택합니다."),
+        paragraph("3. 표에서 파일 짝과 라벨을 확인합니다. 엑셀을 업로드했다면 그 행을 사용합니다. 엑셀이 없으면 파일명의 CNAG 번호 또는 공통 이름으로 짝을 추천하며, 모호한 짝은 직접 지정합니다. 같은 WT를 여러 Mutant와 짝지을 수 있습니다."),
+        paragraph("4. 필요한 출력 행과 PNG, SVG, PDF 형식을 선택합니다. 사이드바의 그림 설정과 일괄 HR 연결이 모든 디자인에 적용됩니다."),
+        paragraph("5. 선택한 디자인 일괄 생성을 누른 뒤 ZIP을 다운로드합니다. 디자인마다 폴더가 생성되고 처리 결과는 processing_report.csv에 기록됩니다. 일부 파일에서 오류가 나도 나머지 파일은 처리합니다."),
+        heading("한 파일 짝에 엑셀 적용하기"),
+        paragraph("파일 업로드 탭의 WT와 Mutant가 엑셀의 파일명과 일치하면 해당 라벨과 TextStyles가 자동으로 적용됩니다. 같은 파일 짝을 여러 디자인에 등록했다면 적용할 디자인 ID를 선택합니다."),
+        heading("직접 편집과 저장"),
+        paragraph("직접 편집 탭에서 글씨, 눈금과 박스를 클릭하여 드래그하거나 방향키로 이동할 수 있습니다. Shift를 함께 누르면 더 크게 이동합니다. 설정을 바꾸면 그림이 다시 생성되므로 세부 위치 조정은 마지막에 합니다."),
+        paragraph("직접 편집한 그림은 그 탭의 SVG 저장 또는 PNG 저장 버튼으로 내려받습니다. 직접 편집 내용은 미리보기 탭의 원본 PDF나 일괄 출력 ZIP에 반영되지 않습니다."),
+        heading("글꼴과 문제 해결"),
+        paragraph("서버에 Arial이 없으면 대체 글꼴을 사용합니다. Streamlit Community Cloud에서는 GitHub 저장소 최상위에 packages.txt를 만들고 fonts-liberation을 한 줄로 입력하면 Liberation Sans를 사용할 수 있습니다."),
+        paragraph("파일 짝이 적용되지 않으면 엑셀과 업로드 파일의 이름 및 확장자를 대조합니다. 양식에는 수식 대신 텍스트를 입력합니다. 긴 이름은 줄이거나 그림 너비와 왼쪽 라벨 공간을 늘려 표시를 조정합니다."),
+        heading("사용 범위"),
+        paragraph("제작 YJ LEE Yujin Lee. 비영리 학술 사용 전용입니다. 최종 그림은 업로드한 원본 GenBank의 주석과 대조하여 확인합니다. 이 가이드는 프로그램에서 생성되므로 별도의 Word 파일을 배포 저장소에 올릴 필요가 없습니다.")]
+    styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="맑은 고딕"/><w:sz w:val="22"/><w:color w:val="000000"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="100" w:line="252" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:after="220"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/><w:color w:val="000000"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="140" w:after="80"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/><w:color w:val="000000"/></w:rPr></w:style></w:styles>'''
+    document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + ''.join(body) + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="900" w:right="1134" w:bottom="900" w:left="1134" w:header="0" w:footer="0"/></w:sectPr></w:body></w:document>'
+    content_types = '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'
+    root_rels = '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+    word_rels = '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, xml in [("[Content_Types].xml", content_types), ("_rels/.rels", root_rels),
+                          ("word/document.xml", document), ("word/styles.xml", styles),
+                          ("word/_rels/document.xml.rels", word_rels)]:
+            archive.writestr(name, xml.encode("utf-8"))
+    return buffer.getvalue()
+
+
+# ============================================================
 # 사이드바
 # ============================================================
 with st.sidebar:
@@ -155,17 +255,12 @@ with st.sidebar:
 
     with st.expander("ℹ️ 사용 가이드 다운로드", expanded=False):
         st.caption("유전자 맵 스튜디오의 상세 사용법과 꿀팁을 확인하세요.")
-        try:
-            with open("🧬 논문 피규어용 유전자 맵 스튜디오 사용 가이드.docx", "rb") as guide_file:
-                st.download_button(
-                    label="📄 가이드 다운로드 (.docx)",
-                    data=guide_file,
-                    file_name="논문_피규어_유전자맵_스튜디오_사용가이드.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
-        except FileNotFoundError:
-            st.caption("가이드 파일이 서버에 없습니다.")
+        st.download_button(
+            label="📄 가이드 다운로드 (.docx)", data=generate_usage_guide(),
+            file_name="Gene_Map_Studio_User_Guide.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
 
     with st.expander("📐 크기", expanded=True):
         st.caption(
@@ -288,7 +383,7 @@ with st.sidebar:
 # ============================================================
 # 텍스트 서식
 # ============================================================
-def format_text(text):
+def _format_text_legacy(text):
     """***굵은기울임*** / **굵게** / *기울임* / ^위첨자^ / ~아래첨자~ 를 mathtext로 변환."""
     if not text:
         return ""
@@ -309,6 +404,87 @@ def format_text(text):
         s = re.sub(r"~([^~]+?)~", r"_{\1}", s)
     s = s.replace(" ", r"\ ")
     return f"${s}$"
+
+
+def _parse_text_markup(text, bold=False, italic=False, script=""):
+    """수동 서식과 아래/위첨자를 문자별 속성으로 읽는다."""
+    chars, i = [], 0
+    while i < len(text):
+        token = next((mark for mark in ("***", "**", "*", "~", "^") if text.startswith(mark, i)), None)
+        if token:
+            end = text.find(token, i + len(token))
+            if end > i + len(token):
+                b, it, sc = bold, italic, script
+                if token == "***": b, it = True, True
+                elif token == "**": b = True
+                elif token == "*": it = True
+                elif token == "~": sc = "sub"
+                elif token == "^": sc = "sup"
+                chars.extend(_parse_text_markup(text[i + len(token):end], b, it, sc))
+                i = end + len(token)
+                continue
+        chars.append({"char": text[i], "bold": bold, "italic": italic, "script": script})
+        i += 1
+    return chars
+
+
+def _mathtext_escape(text):
+    escapes = {" ": r"\ ", "_": r"\_", "$": r"\$", "%": r"\%",
+               "{": r"\{", "}": r"\}", "\\": r"\backslash ", "#": r"\#", "&": r"\&"}
+    return "".join(escapes.get(char, char) for char in text)
+
+
+def format_text(text, styles=None):
+    """선택한 단어의 기울임을 덮어쓰며 기존 굵기·아래/위첨자는 보존한다."""
+    if not styles or not text or "$" in str(text):
+        return _format_text_legacy(text)
+    chars = _parse_text_markup(str(text))
+    plain = "".join(char["char"] for char in chars)
+    for rule in styles:
+        word = str(rule.get("단어", ""))
+        if not word:
+            continue
+        mode = rule.get("일치 방식", "부분 일치")
+        pattern = re.escape(word)
+        if mode == "단어 일치": pattern = r"(?<!\w)" + pattern + r"(?!\w)"
+        elif mode == "전체 일치": pattern = r"\A" + pattern + r"\Z"
+        for match in re.finditer(pattern, plain, flags=re.IGNORECASE):
+            for index in range(match.start(), match.end()):
+                chars[index]["italic"] = bool(rule["italic"])
+    if not any(char["bold"] or char["italic"] or char["script"] for char in chars):
+        return plain
+    groups, i = [], 0
+    while i < len(chars):
+        script = chars[i]["script"]
+        end = i + 1
+        while end < len(chars) and chars[end]["script"] == script: end += 1
+        chunks, j = [], i
+        while j < end:
+            bold, italic = chars[j]["bold"], chars[j]["italic"]
+            finish = j + 1
+            while finish < end and (chars[finish]["bold"], chars[finish]["italic"]) == (bold, italic): finish += 1
+            content = _mathtext_escape("".join(char["char"] for char in chars[j:finish]))
+            if bold and italic: styled = r"\mathbf{\mathit{" + content + "}}"
+            elif bold: styled = r"\mathbf{" + content + "}"
+            elif italic: styled = r"\mathit{" + content + "}"
+            else: styled = r"\mathrm{" + content + "}"
+            chunks.append(styled)
+            j = finish
+        group = "".join(chunks)
+        if script: group = ("_" if script == "sub" else "^") + "{" + group + "}"
+        if not groups and script: groups.append("{}")
+        groups.append(group)
+        i = end
+    return "$" + "".join(groups) + "$"
+
+
+def rules_for_design(styles, design_id):
+    return [rule for rule in (styles or []) if rule["디자인 ID"] in ("*", design_id)]
+
+
+def styled_design_text(text, styles, target):
+    applicable = [rule for rule in (styles or []) if rule["적용 대상"] in ("전체", target)]
+    return format_text(text, applicable)
 
 
 def plain_len(text):
@@ -663,7 +839,7 @@ def plan_track(df, cfg):
 
 
 def render_gene_map(wt_df, mut_df, wt_len, mut_len, hr_edited, settings,
-                    wt_label="WT allele", mut_label="Mutant allele"):
+                    wt_label="WT allele", mut_label="Mutant allele", text_styles=None):
     """단일/일괄 작업에서 같은 레이아웃으로 Figure를 생성한다."""
     trim_left = settings["trim_left"]
     trim_right = settings["trim_right"]
@@ -767,13 +943,13 @@ def render_gene_map(wt_df, mut_df, wt_len, mut_len, hr_edited, settings,
         ax.plot([final_start, final_end], [y, y], color=color_line, lw=line_width,
                 solid_capstyle="butt", zorder=Z_LINE)
 
-    ax.text(final_start - 2 * MM * bp_per_inch, y_wt, format_text(wt_label),
+    ax.text(final_start - 2 * MM * bp_per_inch, y_wt, styled_design_text(wt_label, text_styles, "WT 라벨"),
             ha="right", va="center", color=text_color, fontsize=label_font_size)
-    ax.text(final_start - 2 * MM * bp_per_inch, y_mut, format_text(mut_label),
+    ax.text(final_start - 2 * MM * bp_per_inch, y_mut, styled_design_text(mut_label, text_styles, "Mutant 라벨"),
             ha="right", va="center", color=text_color, fontsize=label_font_size)
 
 
-    def draw_track(track_y, df, plan):
+    def draw_track(track_y, df, plan, target):
         dropped = []
         for idx, row in df[df["표시"] == True].iterrows():
             geo = plan.get(idx)
@@ -784,7 +960,7 @@ def render_gene_map(wt_df, mut_df, wt_len, mut_len, hr_edited, settings,
                 dropped.append(str(row["이름"]))
                 continue
             kind = geo["kind"]
-            name = format_text(row["이름"])
+            name = styled_design_text(row["이름"], text_styles, target)
 
             if kind in ("Enzyme", "Primer"):
                 if s < final_start or s > final_end:
@@ -875,8 +1051,8 @@ def render_gene_map(wt_df, mut_df, wt_len, mut_len, hr_edited, settings,
         return dropped
 
 
-    dropped_wt = draw_track(y_wt, wt_df, wt_plan)
-    dropped_mut = draw_track(y_mut, mut_df, mut_plan)
+    dropped_wt = draw_track(y_wt, wt_df, wt_plan, "WT 내부")
+    dropped_mut = draw_track(y_mut, mut_df, mut_plan, "Mutant 내부")
 
     # ---------- HR 점선 ----------
     if show_hr:
@@ -907,6 +1083,125 @@ def render_gene_map(wt_df, mut_df, wt_len, mut_len, hr_edited, settings,
     return fig, {"fig_height": fig_height, "dropped_wt": dropped_wt,
                  "dropped_mut": dropped_mut, "wt_long": wt_long, "mut_long": mut_long}
 
+
+# ============================================================
+# Excel 설정 양식 — 표준 XLSX 파일을 읽어 표시 설정만 적용
+# ============================================================
+EXCEL_DESIGN_COLUMNS = ["디자인 ID", "출력", "WT 파일", "Mutant 파일", "출력 이름", "WT 라벨", "Mutant 라벨"]
+EXCEL_STYLE_COLUMNS = ["디자인 ID", "적용 대상", "단어", "기울임", "일치 방식"]
+TEXT_STYLE_TARGETS = ["전체", "WT 라벨", "Mutant 라벨", "WT 내부", "Mutant 내부"]
+TEXT_STYLE_MODES = ["부분 일치", "단어 일치", "전체 일치"]
+
+
+def _cell_column(reference):
+    column = 0
+    for letter in re.match(r"[A-Z]+", reference.upper()).group(0):
+        column = column * 26 + ord(letter) - ord("A") + 1
+    return column - 1
+
+
+def _read_xlsx_tables(raw):
+    """shared strings / inline strings를 지원하는 읽기 전용 XLSX 판독기."""
+    ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    attr_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        links = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        relationships = {item.attrib["Id"]: item.attrib["Target"] for item in links.findall("{" + rel_ns + "}Relationship")}
+        strings = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            strings = ["".join(node.itertext()) for node in root.findall("s:si", ns)]
+        tables = {}
+        for sheet in workbook.findall("s:sheets/s:sheet", ns):
+            name = sheet.attrib["name"]
+            if name not in {"Designs", "TextStyles"}: continue
+            target = relationships[sheet.attrib["{" + attr_ns + "}id"]]
+            path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else "xl/" + target)
+            root = ET.fromstring(archive.read(path))
+            rows = []
+            for row in root.findall("s:sheetData/s:row", ns):
+                values = {}
+                for cell in row.findall("s:c", ns):
+                    if cell.find("s:f", ns) is not None:
+                        raise ValueError(f"{name} 시트에는 수식 대신 실제 텍스트를 입력해 주세요.")
+                    kind = cell.attrib.get("t", "")
+                    value = cell.find("s:v", ns)
+                    value = value.text if value is not None else ""
+                    if kind == "s": value = strings[int(value)]
+                    elif kind == "inlineStr": value = "".join(node.text or "" for node in cell.findall("s:is//s:t", ns))
+                    elif kind == "b": value = value == "1"
+                    values[_cell_column(cell.attrib["r"])] = value
+                rows.append(values)
+            if not rows:
+                tables[name] = pd.DataFrame()
+                continue
+            width = max(rows[0].keys(), default=-1) + 1
+            headers = [str(rows[0].get(i, "")).strip() for i in range(width)]
+            if len(headers) != len(set(headers)) or any(not header for header in headers):
+                raise ValueError(f"{name} 1행의 열 이름을 양식 그대로 유지해 주세요.")
+            tables[name] = pd.DataFrame([[row.get(i, "") for i in range(width)] for row in rows[1:]], columns=headers)
+        return tables
+
+
+def excel_text(value, default=""):
+    if value is None or (not isinstance(value, (list, dict)) and pd.isna(value)): return default
+    value = str(value).strip()
+    return value or default
+
+
+def excel_yes(value, default=True):
+    text = excel_text(value).casefold()
+    if not text: return default
+    if text in {"예", "true", "yes", "y", "1"}: return True
+    if text in {"아니오", "false", "no", "n", "0"}: return False
+    raise ValueError(f"예 또는 아니오로 입력해 주세요: {value}")
+
+
+@st.cache_data
+def read_excel_configuration(raw):
+    tables = _read_xlsx_tables(raw)
+    if "Designs" not in tables: raise ValueError("Designs 시트가 필요합니다.")
+    designs = tables["Designs"]
+    missing = [name for name in EXCEL_DESIGN_COLUMNS if name not in designs.columns]
+    if missing: raise ValueError("Designs에 필요한 열: " + ", ".join(missing))
+    jobs, ids = [], set()
+    for number, (_, row) in enumerate(designs.iterrows(), 2):
+        if not any(excel_text(value) for value in row.values): continue
+        design_id = excel_text(row["디자인 ID"])
+        if not design_id or design_id == "*" or design_id in ids:
+            raise ValueError(f"Designs {number}행의 디자인 ID는 고유한 값이어야 합니다.")
+        ids.add(design_id)
+        wt_file, mut_file = excel_text(row["WT 파일"]), excel_text(row["Mutant 파일"])
+        if not wt_file or not mut_file: raise ValueError(f"Designs {number}행에 WT·Mutant 파일 이름을 입력해 주세요.")
+        jobs.append({"디자인 ID": design_id, "출력": excel_yes(row["출력"]),
+                     "WT 파일": wt_file, "Mutant 파일": mut_file,
+                     "출력 이름": excel_text(row["출력 이름"], Path(mut_file).stem),
+                     "WT 라벨": excel_text(row["WT 라벨"], "WT allele"),
+                     "Mutant 라벨": excel_text(row["Mutant 라벨"], "Mutant allele")})
+    if not jobs: raise ValueError("Designs에 디자인을 한 개 이상 입력해 주세요.")
+    style_df = tables.get("TextStyles", pd.DataFrame(columns=EXCEL_STYLE_COLUMNS))
+    missing = [name for name in EXCEL_STYLE_COLUMNS if name not in style_df.columns]
+    if missing: raise ValueError("TextStyles에 필요한 열: " + ", ".join(missing))
+    styles = []
+    for number, (_, row) in enumerate(style_df.iterrows(), 2):
+        word = excel_text(row["단어"])
+        if not word: continue
+        design_id = excel_text(row["디자인 ID"], "*")
+        if design_id != "*" and design_id not in ids:
+            raise ValueError(f"TextStyles {number}행의 디자인 ID가 Designs에 없습니다: {design_id}")
+        target = excel_text(row["적용 대상"], "전체")
+        mode = excel_text(row["일치 방식"], "부분 일치")
+        if target not in TEXT_STYLE_TARGETS: raise ValueError(f"TextStyles {number}행의 적용 대상을 확인해 주세요.")
+        if mode not in TEXT_STYLE_MODES: raise ValueError(f"TextStyles {number}행의 일치 방식을 확인해 주세요.")
+        styles.append({"디자인 ID": design_id, "적용 대상": target, "단어": word,
+                       "italic": excel_yes(row["기울임"]), "일치 방식": mode})
+    return pd.DataFrame(jobs), styles
+
+
+
+EXCEL_TEMPLATE_BASE64 = "UEsDBBQAAAAIAG5VTl2ld+RMBQEAAEQCAAAPAAAAeGwvd29ya2Jvb2sueG1stdI/TsMwFAbwq1hvJ86/hiZq2qULK3AB23lOrMZ2ZLtgVu7Awg2QmLgWPQSioLRiYun29A2fftL3VpuoR/KAzitrWsiSFAgaYTtl+hb2QV4tYbNexebRuh23dkeiHo1vYgtDCFNDqRcDauYTO6GJepTWaRZ8Yl1P/eSQdX5ADHqkeZpWVDNl4LvvmPr5IoZpbGGLXvXGAzmGN10LGRDXqK6F26xgBWZFKnLOS7nM4Zfi/kOxUiqBWyv2Gk34sTgcWVDW+EFNHgj9i7nHGO7C04jnnnz2cCZZmnPGs6ouy/r64p7D8/vh9e3z4+WMU8wciQteCb5gZV2VnFcX4NDTbPT0EesvUEsDBBQAAAAIAG5VTl08TXL9CgIAAEwNAAANAAAAeGwvc3R5bGVzLnhtbNWXTW/bMAyG/4qg++LYTtYuqFtk6Qx0BXpYeuhVtmVHACUZktI5+/WD5M+mSOcWHRDn4pdE+JAyCYW5uqk4oGeqNJMiwv5sjhEVqcyYKCK8N/mXS3xzfVWttDkA3e4oNajiIPSqivDOmHLleTrdUU70TJZUVBxyqTgxeiZV4elSUZJpG8bBC+bzrx4nTGBLzKUwGqVyL0yEl53LJfuDnglE2Pcx8qxDEE5r14YoYEY6v9dHjIh8kEaiLREabX7eo/tfpxBJHfiKlEqQCqkiiXDcfD6c4224f7FYX4affoCxpEZox2QAx01iAPZZEmOoEjEDQI1+PJQ0wkIK2hGbL/8zqFDk4AfLd8dpCSyr6yo2w5cYhOHt8lvLG8R/Ev/HbRzG6//HH0zYSX4jXKcSqTKqul75uHdaBTQ39RgoVuwaaWRZi0QaI3mtM0YKKQg0mVtEJ122lAJs7ZXwlB+lrHIk9jzm5i6L8BwjO0qtZACNrFGNUScaItsUQ3rwUXyV93lOA/wRAFKWcHjY84Sq2N1yLsx5YymGFgPore8O5uwzKMHZa2CF4LRvG2kd9sfAsNReEykVhqq2P1U+svZgarUHE649nPDMDGoPJ1z7Ymq1n+s981uR8pFWNXzMQRZnepB31h5OeIDCCQyQ1y0TL1aXo8Wl8yO7KNslWXECL9eH4Zqindn/L7r+C1BLAwQUAAAACABuVU5d+lwBWQMDAADaDQAAEwAAAHhsL3RoZW1lL3RoZW1lMS54bWy9V9tymzAU/BVG7w03c/OEZBLHbh/SaafJD8ggQI0QHkmOnb/vIG4CjOM0duwHS2LP2UXnsMLXt/ucaK+IcVzQEJhXBtAQjYoY0zQEW5F888HtzTWciwzlSKMwRyFYZFB8//0MtH1OKJ/DEGRCbOa6zqMM5ZBfFRtE9zlJCpZDwa8KluoxgztM05zolmG4eg4xBW3eJUE5ooKXCxFhT9EBsvJa/GKWP/yNLwjTXiEJwQ7TuNg9o70AGoFcLAgLgSE/QNNvrvU2ioiJYCVwJT9NYB0Rv1gykKXrNtJYWv7M7BgkgogxcOmX3y6jRMAoQrSWo4JNxzV8qwErqGp4IHvgmfYgQGGwxwyBe2/N+gESVQ1n4xtdBcsHpx8gUdXQGQXcGdZ9YPcDJKoauqOA2fLOs5b9AInKCKYvY7jr+b7bwFtMUpAfB/GB6xreQ4PvYLrSalUCKnqN9ytJcIRk3+Xwb8FWBRWyylBgqom3DUpgVDYoJHjNsPaI00xIHjhH8B1AxI8C9AFnjum7Ao5QHyFt6ToGXd0MuTW5mHwkE0zIk3gj6JFLcbwgOF5hQuRERrWl2GQLwhrCHjBlsBvzOlXKtU3BQ2CAyVzSQTAV1ZrrNU89nJNt/rOI66Y3WzuAcw5Fd8FwFJ9oGeQs5aqGEneyDs+e0NHRDXXYJ+qQd3KyEN/8sJDgqBBdKQ/BVIPlKeHMarvlESQoLgtWJ+iV9SwlDmZTd2R9dmtPKDHPYIyavMaUkqlm67rwDEVWpHj+YSVBMCGk3KpLFFkf2wGh/Zm2K/m95u7+yyw2jIsHyLMKJy+15ytVaALD+QIaq9yZy9Howz1ESYIiMbHSTR+5qLMcvPxZdDkptgKxpyzeaWuyZX9gHALHMx0DaDHmoimAFmPWtc/4/aJbh2STwdrJew9thZfjllMRK+UMpffnteJ1ujrLcfV+1MC1puzWm34SL3A+Bsq5pPhH4H/UUyurPPexqepQ5U0arT0hz76Q0XZd+XWGOmzZ0mOb1zE5G/yBalZu/gFQSwMEFAAAAAgAb1VOXQ0euehlAAAAcwAAABQAAAB4bC9zaGFyZWRTdHJpbmdzLnhtbAXBUQrDIAwA0KtI/mfcPsaQ2p5F2rQKJhaTDY+/95ZtcnM/Glq7JHj6AI5k70eVK8HXzscHtnWZUdXc5CYaZ4JidkdE3QtxVt9vksnt7IOzqe/jQr0H5UMLkXHDVwhv5FwFHK5/UEsDBBQAAAAIAG9VTl0r14Ca5AIAAB0JAAAYAAAAeGwvd29ya3NoZWV0cy9zaGVldDEueG1snZZNT9swGID/iuXz1qRJP1BFikoLDAkQgo4ekUnc1sKxs9j9YAdOHJDGYQcmcVinHbZp52maduAfNfsPk92QUuZm607Jm/d9/Dp+kjjrG+OQgiGOBeHMg8WCDQFmPg8I63lwILvP1+BGfX1cG/H4XPQxlmAcUiZqYw/2pYxqliX8Pg6RKPAIs3FIuzwOkRQFHvcsEcUYBRoLqeXYdsUKEWFQDaivnhA8EgsREH0+2olJsEcYFh60IVCtzzg/V+ndQF1SRIQYBhfHESXSg0UIJI/2cFc2MaUebDgQIF+SIT5EDHvwjEvJQ5WHQEgksQe7MX+NGQRWfd161H8xms9tW9/WYQwC3EUDKo/46AUmvb5qXtajjGs+pxrwOQUhUcsJQYjG+jgigex7sFiBoE+CADN9a/5ASB520tx8mBnupLgzx+0VcDfF3Qx3nRXwUoqX/g8vp3g5wx13BbyS4pU5vsrSVVO8ugJuzQ1q5S0kkQpiPgKxLlK23dIDnPnXz6OvahpFCIReMulBIWOdGdant7fJh7fJ5CfYbak2w1mzDNs0Y8mP99OPn01A0wx02uDXzU0yuTcxLTOzP5CIyRxuK29yIJl8n365MnHbS+c4ndxPv301MTu5czRwltbzyJKTWrLzLDm6S+VJl5ZtF412zOXJ3bVRjbm6edDYObVtd20NdNoAUYopLvTOjKL+OsJBo72E3TKz+8fHpdNm+6hkFGVmsmkaRZmZw0vV5LIGVMN8Ue6/iHJ1l+qfohyjKHP5MlHm6h5m2DntLFvgVh61/3KplzwswIL0mFGNGctXY2bSd8jAPaixnnz3AiTRCaIkQJJwJoDPByzzs5gE8iLCHqREqA32VYy76rWpbRZte7Zbq7+CAUXFOkzurp8l766mb66Tu09QNc1yKlgc13BJf58j1MP7KO4RJgDFXelBu1CFIJ49Qfpc8kiflSGY7f4PUR+jAMcqciHoci6zYLYHZH869d9QSwMEFAAAAAgAb1VOXTAQGEE8AwAAyAsAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0Mi54bWytlk9P2zAUwL+K5ePUNWn6h6kiRdCyDQkmBAjOpnHbiCTObJeWnWDrAYkddmBThVTEYQe4IYQQk/hESz7EZKe0FF5LK+3UPvv9/F5+dlrPL7R9D+1TLlwW2DiTNjGiQZU5blC3cVPW3r7DC6X5drHF+J5oUCpR2/cCUWzbuCFlWDQMUW1Qn4g0C2nQ9r0a4z6RIs143RAhp8TRmO8ZlmkWDJ+4AVYL6tFtl7bESIREg7U+cNdZdQMqbGxipErvMranplccNaSIkAQUHWyGnittnMFIsnCV1mSZep6NFy2MSFW6+3SdBNTGu0xK5qt5jIQkktq4xtkXGmBklOaNJ/VHo2Fv7/VjrXPk0BppenKDtT5St95QxfN6lXaxyjwNVJmHfFfpxMgnbf3Zch3ZsHGmgFHDdRwa6EerNoVk/k5/brhMglt93BrgVmYGPNvHs0M8NwOe6+O5YfPWDHi+j+eH1c3XcGPoUEuvEElUwFkLcZ2kfGdzj/BgB/SJqKqcxQxGQjctbSwk1zP7pej0ND7/Effu0UpFldlPig2wJRiLL47isysUfT+Mvx1BXHlMuZPL+NctBFRg4O/9dXx2H593IGZ5THO9h/hPF0XXV/FJb4QztLIn5qy+OXOSOUtXKTyr8gbUBefGF534BnzsMgx8WtwCJY1ZvnsM6oGzkz1AiaXJerLT6MnqKnNT6YFzJ+iBgXXOdikoaEyBn53o5Dju/gY1TWpqKk25aTTlwM2omGYGNAWnTzAFA+WtjRwoKjfTSYKzo7vD6K4zlaL8NIry4EaMVQSnT1AEA2ubm7CiMeuPUQRnz/CyFaZRVJjtFMHpa01JAomir7fR3SFoCuZCznwmKQdtwcjkNw9mXndmPPsfdIgk28RzHSJdFghUZc1AqcQvJ5E8CKmNPVeoK89nTmvqV7u4lDHN5P6k7mlNj2RKODlJqZ0tFPUeopvL1KO3JFLj2uBgXEdYdTdYRAWjDUzXUsUqVqCWusepgdL/U2nZKi4DlUbe7dTIlqRGfhpf7+LFkL7IhKRO1wivu4FAHq1JG5vpOYx4cub1d8lC/S2PUXJRfYwalDiUqyiLUY2pM9kPksvS4FJe+gdQSwMEFAAAAAgAb1VOXVymW4qsBgAAchIAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0My54bWyVmM1u20YQgF9lQPRkqPrzTxwjTNHWaGugAYwmaIAeAjAWbQuRRIFkYqeHQmnoQLUUWG7EWHYplUGdyAkcQHEUWwbUSx6gD9Ejd/gOxSypnzgbmz1Jy52Z3fl2ZnbIK1+s53NwT9WNrFaQpVQ8KYFaWNIy2cKKLN01lz+flb64emV9bk3T7xirqmrCej5XMObWZWnVNItziYSxtKrmFSOuFdXCej63rOl5xTTimr6SMIq6qmS4Wj6XSCeTM4m8ki1IZJA//TGrrhkfjMBY1da+1bOZ77MF1ZClpAS09G1Nu0PTCxl6RBpFpaDC/evFXNaUpZQEplb8Xl02v1ZzOVn6Mi2BsmRm76mLSkGVpduaaWp5mpfAMBVTlaVlXftZLUiQuHolMbb+h6PR3r7hbi3qkFGXlbs58wdt7Ts1u7JKi09zK+tzS1qOKyxpOchnCacEeWWd/65lM+aqLKVnJFjNZjJqgbu2dNcwtfzNYC41MhOop0P19FA9lZy6SD8x2gff+LxiKjTQtTXQuRDteXJqoDz0glNdIpkvUxIYsjQlgSlLhqnzmXtXffs1e/WSFrgXLDNU+EqsgK0N5j4H1nnJjuwP9BJ8P2PbSgfbmkqft600XyWV/GiZbdzZACw7aDnC7YWKqTOK86qRXSkYuFuCG+q6ed28n1MN9rwPZNF6A/8++h3QfoPNBuDONm6UAK19dG3wH77GnRrgzgZ75rAnDpf8Vi18pRTugF+tYrN/ZtI76bEXfcBjh7nPz0cxGQXF5CdQNMpYccB/+puQw6SYw0CLb5y92vDe9oE1++zoAJsWYGUf3cEsuc3aLe+oClhuoGv7dgOtHu7V47Qqlz+ue50SPd85BNw5ZH8eAqvXsVXDZo8EWLvKnuyTPmCrjJvvWKXMKvvx87FMRcEyxR28fMa/4eqwMC/kEqjNfiI8dmpoOeB1HozcYG3aMXhvXXRcWJjnQfPrIe69HOMxiqnQBNvapchYmGfPHPDtLquchoHBubVLnOfLSDimo+CYFuK4eQMScO2uqRTM8FSFUKaFUIZh7dvuRyHf7LIXFvni79rYeo6tmndaxXYJyLFdihUeOLwsjIHyOrvYLMHNGxxjEDEhF8qykKv7fyNmJgqiGSEiQZ4OsMyIsTTKIIfpHQO0LVYpY2MfZPDedJlVZn90vF4nHkoMSZXgp4VFYL922XGJyoy/1WWP61SQwoJxhmwXWC1afFyK4vylC+MjKANCEJfEIHb7+OpvOjd/28EKD5NRXFD2OC579loYB+y0jKe9IBRAyeXUnDraSTDmmRMajgZiNgqIWXEU2BZrNfDoAFs1SAA6VvBfiGNWiOOXr2/8MPUL26zDuLEY3Pqnfos/HdgkGIE7gI3yHCwGmnNw7fr1qfM9vBzFw8tCD0clCi4skpeFDk6ADOzVAXvijizEYD6ZTAF7wq/OhXnKgpPeePWsxgEtBytN8E4cPOXpTyiCOhmgCi90OnF0H/ASEO3E6Va8GAhJic6cLwWsWsKHD8S9TlIc+K6FR11IUOwGWXM2i8I5nuxjc8EY97cBLdd/2BxPCD5HccI6Nm7uvz9Z1LXb6vsTv26xZp/y6qD3/sTfO8BH1UGaDQPpAkqpSJRS4hu1coBPyVmv18G9HrYsMaqUEJVv8xaFFwnbgcBY0HeFFcF761IaAGvUBrnD6ykXOktpNLtZH1yrgU0KP9rhs+5oo2zLIiF0I1eQVKTmlKRE8dTs42mDemCsNMWQ0kJIdPDHFoT6Mvhbh759wGoOBDOsXY2Fbo6E2NYGe/E3F+IzMQjDcijh9UpYPwgfe51ScPlawOzqR2nGs+BRlR32sMXPwXt3yI4tQk93ur0Z9SZOReppSUpAkOoga1cHJ9jser2OGOSkGGTASAYyFBsFAt3XjXIMPjghYjgOPs61oKhrec1U9bBADYacyUmPVUujeynqBZ2K1NCSlIBJGNRYbrCt3bCUipmIW9uJIYWJGExMeO/eeUfVCf6fBtgsjQQmJnh8BO8D5/dj4y0vvTTxTKWuRZiV3Dy3uNch0ajpGLa+0+eDE/e++HSbThkdF9slMbFP9L0Vx9/shTWWXpBS/HWH3gy74w0ONxxUsFhYz4Camp2gkJUbtDzlVcUFf+Mxbu77mz0qa8z6C53+oKZ9Fo/HPwNsP0B3e6g1OAJ+IQRF8601vEG7Yf6yWsT0HHzoGHwhKCor6jVFX8kWDMipy6YsJeOXJNADuPy/qRX5v2kJgk8qg9GqqmRUnUaTEixrlBzhIPgkMfx8dPU/UEsDBBQAAAAAAG9VTl0H9UwxKAEAACgBAAALAAAAX3JlbHMvLnJlbHPvu788P3htbCB2ZXJzaW9uPSIxLjAiIGVuY29kaW5nPSJ1dGYtOCI/PjxSZWxhdGlvbnNoaXBzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L3JlbGF0aW9uc2hpcHMiPjxSZWxhdGlvbnNoaXAgVHlwZT0iaHR0cDovL3NjaGVtYXMub3BlbnhtbGZvcm1hdHMub3JnL29mZmljZURvY3VtZW50LzIwMDYvcmVsYXRpb25zaGlwcy9vZmZpY2VEb2N1bWVudCIgVGFyZ2V0PSIveGwvd29ya2Jvb2sueG1sIiBJZD0iUjNiYjAwZjg3NWMyYzQ4MzkiIC8+PC9SZWxhdGlvbnNoaXBzPlBLAwQUAAAACABvVU5dGlg7BDMBAAAwBAAAGgAAAHhsL19yZWxzL3dvcmtib29rLnhtbC5yZWxzzdMxTsMwFAbgq0TeiR3HSRzUtAsLa+kFbOc5iRrbke1CejYGjsQVEAWhBDGwVOryhv9Jvz4/ye+vb5vdbMbkGXwYnG1QlhKUgFWuHWzXoFPUdxzttps9jCIOzoZ+mEIym9GGBvUxTvcYB9WDESF1E9jZjNp5I2JIne/wJNRRdIApISX2yw607kwO5wn+0+i0HhQ8OHUyYOMfxTjE8wgBJQfhO4gNwvP4naWzGVHy2DZoT4nitOQ8awljWc1Qgq8Gij0YWHsu0dfMFqpMlKomtGpJ0TLN1TVVoRce2qfoB9v9vtZyteAxrpiuWA5FLVhb8GvyXpw/hh4grmk/8ecDAOLqernIIcuJolIyzekN8OiCJ4UWhEohs7JmrK5ugJcveBoKWSpZCFaXTMrywsOrf7/9AFBLAwQUAAAACABvVU5dfZsMix8BAABlBAAAEwAAAFtDb250ZW50X1R5cGVzXS54bWzNlMFKAzEQhl9lyVU22a0gIrvtQb2qoC8QsrO7ockkZKZ1+2wefCRfQZpKERFKsQUvmcvk/77/Mh9v781i8q5YQyIbsBW1rEQBaEJncWjFivvyWizmzcsmAhWTd0itGJnjjVJkRvCaZIiAk3d9SF4zyZAGFbVZ6gHUrKqulAnIgFzyNkPMmzvo9cpxcT8x4A47eSeK293eFtUKHaOzRrMNqNbY/YCUoe+tgS6YlQdkSTGB7mgEYO9kntJrixc5WP3KTODoOOhXK5nA5R0abaQ94nENKdkOiied+EF7aIWanCLeOCB54oY59BCaR/Cwe+s/C+SYg2VHnaB75mRxOHnn79mHRF5DWuaPpPKoTyyzzz9WZPZfRC7PLqLy0Zh/AlBLAQIUAxQAAAAIAG5VTl2ld+RMBQEAAEQCAAAPAAAAAAAAAAAAAACkgQAAAAB4bC93b3JrYm9vay54bWxQSwECFAMUAAAACABuVU5dPE1y/QoCAABMDQAADQAAAAAAAAAAAAAApIEyAQAAeGwvc3R5bGVzLnhtbFBLAQIUAxQAAAAIAG5VTl36XAFZAwMAANoNAAATAAAAAAAAAAAAAACkgWcDAAB4bC90aGVtZS90aGVtZTEueG1sUEsBAhQDFAAAAAgAb1VOXQ0euehlAAAAcwAAABQAAAAAAAAAAAAAAKSBmwYAAHhsL3NoYXJlZFN0cmluZ3MueG1sUEsBAhQDFAAAAAgAb1VOXSvXgJrkAgAAHQkAABgAAAAAAAAAAAAAAKSBMgcAAHhsL3dvcmtzaGVldHMvc2hlZXQxLnhtbFBLAQIUAxQAAAAIAG9VTl0wEBhBPAMAAMgLAAAYAAAAAAAAAAAAAACkgUwKAAB4bC93b3Jrc2hlZXRzL3NoZWV0Mi54bWxQSwECFAMUAAAACABvVU5dXKZbiqwGAAByEgAAGAAAAAAAAAAAAAAApIG+DQAAeGwvd29ya3NoZWV0cy9zaGVldDMueG1sUEsBAhQDFAAAAAAAb1VOXQf1TDEoAQAAKAEAAAsAAAAAAAAAAAAAAKSBoBQAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgAb1VOXRpYOwQzAQAAMAQAABoAAAAAAAAAAAAAAKSB8RUAAHhsL19yZWxzL3dvcmtib29rLnhtbC5yZWxzUEsBAhQDFAAAAAgAb1VOXX2bDIsfAQAAZQQAABMAAAAAAAAAAAAAAKSBXBcAAFtDb250ZW50X1R5cGVzXS54bWxQSwUGAAAAAAoACgCPAgAArBgAAAAA"
 
 # ============================================================
 # 일괄 작업 — 파일 짝짓기와 그림 ZIP 생성
@@ -941,13 +1236,13 @@ def suggest_batch_pairs(wt_files, mutant_files, wt_label="WT allele", mut_label=
     for uploaded in wt_files:
         by_key.setdefault(file_pair_key(uploaded.name), []).append(uploaded.name)
     rows = []
-    for uploaded in mutant_files:
+    for order, uploaded in enumerate(mutant_files, 1):
         candidates = by_key.get(file_pair_key(uploaded.name), [])
         candidate = candidates[0] if len(candidates) == 1 else ""
-        rows.append({"출력": True, "WT 파일": candidate, "Mutant 파일": uploaded.name,
+        rows.append({"디자인 ID": f"D{order:03d}", "출력": True, "WT 파일": candidate, "Mutant 파일": uploaded.name,
                      "출력 이름": Path(uploaded.name).stem,
                      "WT 라벨": wt_label, "Mutant 라벨": mut_label})
-    return pd.DataFrame(rows, columns=["출력", "WT 파일", "Mutant 파일", "출력 이름", "WT 라벨", "Mutant 라벨"])
+    return pd.DataFrame(rows, columns=EXCEL_DESIGN_COLUMNS)
 
 
 def upload_lookup(uploaded_files):
@@ -966,7 +1261,7 @@ def safe_output_stem(value, fallback):
     return name[:150]
 
 
-def batch_signature(wt_files, mutant_files, pair_df, settings, formats, hr_pairs, rules_key):
+def batch_signature(wt_files, mutant_files, pair_df, settings, formats, hr_pairs, rules_key, text_styles=None):
     digest = hashlib.sha256()
     for role, files in (("WT", wt_files), ("Mutant", mutant_files)):
         for uploaded in files:
@@ -975,12 +1270,12 @@ def batch_signature(wt_files, mutant_files, pair_df, settings, formats, hr_pairs
             digest.update(hashlib.sha256(uploaded.getvalue()).digest())
     digest.update(pair_df.to_json(force_ascii=False).encode("utf-8"))
     digest.update(hr_pairs.to_json(force_ascii=False).encode("utf-8"))
-    digest.update(json.dumps([settings, formats, rules_key], ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    digest.update(json.dumps([settings, formats, rules_key, text_styles], ensure_ascii=False, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()
 
 
 def build_batch_zip(pair_df, wt_files, mutant_files, rules_key, settings, formats,
-                    hr_pairs=None, progress_callback=None):
+                    hr_pairs=None, progress_callback=None, text_styles=None):
     wt_lookup, mut_lookup = upload_lookup(wt_files), upload_lookup(mutant_files)
     formats = [str(fmt).lower() for fmt in formats]
     if not formats or any(fmt not in {"png", "svg", "pdf"} for fmt in formats):
@@ -1010,7 +1305,8 @@ def build_batch_zip(pair_df, wt_files, mutant_files, rules_key, settings, format
                 mut_df, mut_len, mut_notes = parse_file(mut_lookup[mut_name], True)
                 fig, info = render_gene_map(
                     wt_df, mut_df, wt_len, mut_len, hr_pairs, settings,
-                    str(row.get("WT 라벨", "WT allele")), str(row.get("Mutant 라벨", "Mutant allele")))
+                    str(row.get("WT 라벨", "WT allele")), str(row.get("Mutant 라벨", "Mutant allele")),
+                    text_styles=rules_for_design(text_styles, str(row.get("디자인 ID", ""))))
                 stem = safe_output_stem(row.get("출력 이름", ""), f"design_{order:03d}")
                 root, suffix = stem, 2
                 while stem.casefold() in used_names:
@@ -1051,8 +1347,8 @@ def build_batch_zip(pair_df, wt_files, mutant_files, rules_key, settings, format
 # ============================================================
 # 메인
 # ============================================================
-tab_upload, tab_edit, tab_hr, tab_view, tab_free, tab_batch = st.tabs(
-    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드", "✍️ 직접 편집", "📦 일괄 작업"]
+tab_upload, tab_edit, tab_hr, tab_view, tab_free, tab_batch, tab_excel = st.tabs(
+    ["📂 파일 업로드", "🛠️ 요소 편집", "🔗 HR 연결", "🖼️ 미리보기 & 다운로드", "✍️ 직접 편집", "📦 일괄 작업", "📋 엑셀 설정"]
 )
 
 with tab_upload:
@@ -1067,6 +1363,27 @@ rules_key = (
     split_rule(rule_probe), split_rule(rule_primer),
     int(rule_enzyme_max), int(rule_primer_max), bool(hide_unnamed),
 )
+
+excel_config, excel_styles = None, []
+excel_upload = None
+with tab_excel:
+    st.caption("Designs에 파일별 이름을, TextStyles에 특정 단어의 기울임 여부를 입력하세요. 이 설정은 단일 그림과 일괄 작업 모두에 적용됩니다.")
+    st.download_button("📥 엑셀 입력 양식 다운로드", data=base64.b64decode(EXCEL_TEMPLATE_BASE64),
+        file_name="Gene_Map_Input_Template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="excel_template")
+    excel_upload = st.file_uploader("작성한 엑셀 설정 업로드", type=["xlsx"], key="excel_settings")
+    if excel_upload:
+        try:
+            excel_config, excel_styles = read_excel_configuration(excel_upload.getvalue())
+            st.success(f"{len(excel_config)}개 디자인과 {len(excel_styles)}개 서식 규칙을 불러왔습니다.")
+            st.dataframe(excel_config, hide_index=True, use_container_width=True)
+            if excel_styles:
+                style_preview = pd.DataFrame(excel_styles).rename(columns={"italic": "기울임"})
+                style_preview["기울임"] = style_preview["기울임"].map({True: "예", False: "아니오"})
+                st.dataframe(style_preview, hide_index=True, use_container_width=True)
+        except Exception as error:
+            st.error(f"엑셀 설정을 읽지 못했습니다: {error}")
+    st.caption("디자인 ID의 *는 모든 그림에 적용합니다. 아래쪽 규칙이 우선하며 기울임만 바뀌므로 굵기와 아래첨자는 유지됩니다. $...$ 직접 수식은 단어별 규칙에서 제외됩니다.")
 
 # 일괄 작업은 단일 파일 업로드 없이도 사용할 수 있다.
 with tab_batch:
@@ -1085,16 +1402,19 @@ with tab_batch:
         except ValueError as error:
             st.error(str(error))
         else:
-            suggested = suggest_batch_pairs(batch_wt, batch_mut, wt_label, mut_label)
+            suggested = excel_config.copy() if excel_config is not None else suggest_batch_pairs(batch_wt, batch_mut, wt_label, mut_label)
             st.caption("파일명의 CNAG 번호 또는 공통 이름이 같은 짝을 추천합니다. WT 후보가 여러 개이거나 이름이 다르면 빈칸에서 직접 선택하세요. 같은 WT를 여러 Mutant와 짝지을 수 있습니다.")
             pair_editor_key = "batch_pairs_" + hashlib.sha256(
-                json.dumps([[f.name for f in batch_wt], [f.name for f in batch_mut]], ensure_ascii=False).encode("utf-8")
+                json.dumps([[f.name for f in batch_wt], [f.name for f in batch_mut],
+                            hashlib.sha256(excel_upload.getvalue()).hexdigest() if excel_upload else ""], ensure_ascii=False).encode("utf-8")
             ).hexdigest()[:12]
             batch_pairs = st.data_editor(suggested, hide_index=True, use_container_width=True,
                 key=pair_editor_key, column_config={
+                    "디자인 ID": st.column_config.TextColumn("디자인 ID", disabled=True),
                     "출력": st.column_config.CheckboxColumn("출력"),
-                    "WT 파일": st.column_config.SelectboxColumn("WT 파일", options=[""] + [f.name for f in batch_wt], required=True),
-                    "Mutant 파일": st.column_config.TextColumn("Mutant 파일", disabled=True),
+                    "WT 파일": st.column_config.SelectboxColumn("WT 파일", options=list(dict.fromkeys([""] + [f.name for f in batch_wt] + suggested["WT 파일"].tolist())), required=True),
+                    "Mutant 파일": st.column_config.SelectboxColumn("Mutant 파일",
+                        options=list(dict.fromkeys([f.name for f in batch_mut] + suggested["Mutant 파일"].tolist())), required=True),
                     "출력 이름": st.column_config.TextColumn("출력 이름", required=True),
                     "WT 라벨": st.column_config.TextColumn("WT 라벨"),
                     "Mutant 라벨": st.column_config.TextColumn("Mutant 라벨"),
@@ -1107,15 +1427,19 @@ with tab_batch:
                                           use_container_width=True, key="batch_hr")
             batch_settings = {key: st.session_state[key] for key in PRESET_DEFAULTS}
             signature = batch_signature(batch_wt, batch_mut, batch_pairs, batch_settings,
-                                        batch_formats, batch_hr, rules_key)
+                                        batch_formats, batch_hr, rules_key, excel_styles)
             selected_pairs = batch_pairs[batch_pairs["출력"] == True]
             if st.button("📦 선택한 디자인 일괄 생성", key="batch_generate"):
                 if selected_pairs.empty:
                     st.warning("출력할 항목을 하나 이상 선택해 주세요.")
+                elif excel_upload and excel_config is None:
+                    st.warning("엑셀 설정의 오류를 먼저 수정하거나 업로드를 해제해 주세요.")
                 elif not batch_formats:
                     st.warning("출력 형식을 하나 이상 선택해 주세요.")
                 elif any(str(name) not in {f.name for f in batch_wt} for name in selected_pairs["WT 파일"]):
-                    st.warning("선택한 모든 행에서 WT 파일의 짝을 먼저 지정해 주세요.")
+                    st.warning("선택한 모든 행에서 업로드한 WT 파일의 짝을 지정해 주세요.")
+                elif any(str(name) not in {f.name for f in batch_mut} for name in selected_pairs["Mutant 파일"]):
+                    st.warning("선택한 모든 행의 Mutant 파일을 업로드하거나 파일명을 수정해 주세요.")
                 else:
                     progress = st.progress(0.0, text="디자인 생성 중...")
                     try:
@@ -1123,7 +1447,7 @@ with tab_batch:
                             batch_pairs, batch_wt, batch_mut, rules_key, batch_settings,
                             batch_formats, batch_hr,
                             progress_callback=lambda done, total: progress.progress(
-                                done / total, text=f"디자인 생성: {done}/{total}"))
+                                done / total, text=f"디자인 생성: {done}/{total}"), text_styles=excel_styles)
                         st.session_state["batch_result"] = (signature, data, report, completed)
                     except Exception as error:
                         st.error(f"일괄 작업 오류: {error}")
@@ -1153,6 +1477,24 @@ if not (wt_file and mutant_file):
     with tab_free:
         st.info("파일 업로드 후 사용할 수 있습니다.")
     st.stop()
+
+single_styles = rules_for_design(excel_styles, "")
+if excel_upload and excel_config is None:
+    st.error("엑셀 설정의 오류를 수정하거나 엑셀 업로드를 해제해 주세요.")
+    st.stop()
+if excel_config is not None:
+    matching = excel_config[(excel_config["WT 파일"] == wt_file.name) &
+                            (excel_config["Mutant 파일"] == mutant_file.name)]
+    if not matching.empty:
+        with tab_upload:
+            selected_design_id = st.selectbox("적용할 엑셀 디자인", matching["디자인 ID"].tolist(), key="single_excel_design")
+            selected = matching[matching["디자인 ID"] == selected_design_id].iloc[0]
+            st.caption("이 파일 짝의 엑셀 라벨과 단어별 서식을 적용합니다.")
+        wt_label, mut_label = selected["WT 라벨"], selected["Mutant 라벨"]
+        single_styles = rules_for_design(excel_styles, selected_design_id)
+    else:
+        with tab_upload:
+            st.info("엑셀에 이 파일 짝이 없어서 기본 라벨과 공통 서식만 적용합니다.")
 
 wt_df_raw, wt_len, wt_notes = parse_to_dataframe(
     decode_genbank_bytes(wt_file.getvalue()), False, rules_key)
@@ -1211,7 +1553,7 @@ with tab_hr:
 
 figure_settings = {key: st.session_state[key] for key in PRESET_DEFAULTS}
 fig, figure_info = render_gene_map(
-    wt_df, mut_df, wt_len, mut_len, hr_edited, figure_settings, wt_label, mut_label)
+    wt_df, mut_df, wt_len, mut_len, hr_edited, figure_settings, wt_label, mut_label, single_styles)
 fig_height = figure_info["fig_height"]
 dropped_wt, dropped_mut = figure_info["dropped_wt"], figure_info["dropped_mut"]
 wt_long, mut_long = figure_info["wt_long"], figure_info["mut_long"]
