@@ -557,17 +557,13 @@ def plan_track(df, cfg):
         if rows:
             fs = cfg["marker_font_size"]
             th = text_height(fs)
-            y0 = base + 1.2 * MM
+            # 모든 Probe 이름은 박스 바로 아래: 위쪽 Probe는 먼저 라벨 공간 확보.
+            y0 = base + 1.2 * MM + (th + 0.8 * MM if side == 1 else 0.0)
             y1 = y0 + cfg["probe_h"]
-            any_outside = False
             for i, r in rows:
-                w_bp = float(r["종료"]) - float(r["시작"])
-                need = text_bp_width(r["이름"], fs, cfg["bp_per_inch"])
-                lab_out = need > w_bp * 0.92
-                any_outside = any_outside or lab_out
                 plan[i] = {"kind": "Probe", "side": side, "y0": y0, "y1": y1,
-                           "label": True, "fontsize": fs, "label_outside": lab_out}
-            base = y1 + 1.0 * MM + (th + 0.8 * MM if any_outside else 0.0)
+                           "label": True, "fontsize": fs, "label_outside": True}
+            base = y1 + 1.0 * MM + (th + 0.8 * MM if side == -1 else 0.0)
 
         extent[side] = max(extent[side], base)
 
@@ -627,16 +623,32 @@ def plan_track(df, cfg):
         extent[-1] = max(extent[-1], head_half)
 
     if overflow:
-        side_out = 1 if extent[1] <= extent[-1] else -1
         th = text_height(cfg["marker_font_size"])
-        y_out = extent[side_out] + 1.2 * MM
         placed = place_labels(overflow, cfg["marker_font_size"], cfg["bp_per_inch"],
                               gap_bp, max_shift, True, max_tiers=2)
+        max_tier = max((tier for tier, _ in placed.values()), default=0)
+        if cfg.get("outside_below", False):
+            # Mutant: 긴 이름은 해당 박스 바로 아래에 표시한다.
+            side_out = -1
+            box_bottom = max(
+                cfg["box_h"] * (cfg.get("head_ratio", 1.8) if plan[i]["arrow"] else 1.0) / 2
+                for i, _, _ in overflow
+            )
+            y_out = box_bottom + 0.6 * MM
+            label_bottom = y_out + max_tier * (th + 0.6 * MM) + th
+            # 아래쪽 효소/프라이머/Probe는 라벨 밴드 아래로 옮겨 겹침을 피한다.
+            for geo in plan.values():
+                if geo["side"] == -1 and geo["kind"] in ("Enzyme", "Primer", "Probe"):
+                    geo["y0"] += label_bottom
+                    geo["y1"] += label_bottom
+            extent[-1] += label_bottom
+        else:
+            side_out = 1 if extent[1] <= extent[-1] else -1
+            y_out = extent[side_out] + 1.2 * MM
+            extent[side_out] = y_out + max_tier * (th + 0.6 * MM) + th
         for i, x, name in overflow:
             tier, xlab = placed.get(i, (0, x))
             plan[i].update(side=side_out, y_out=y_out + tier * (th + 0.6 * MM), xlab=xlab)
-        extent[side_out] = y_out + (max(t for t, _ in placed.values()) if placed else 0) \
-            * (th + 0.6 * MM) + th
 
     return plan, extent, long_names
 
@@ -764,7 +776,7 @@ cfg_common = dict(
 )
 
 wt_plan, wt_ext, wt_long = plan_track(wt_df, dict(cfg_common, out_side=1))
-mut_plan, mut_ext, mut_long = plan_track(mut_df, dict(cfg_common, out_side=-1))
+mut_plan, mut_ext, mut_long = plan_track(mut_df, dict(cfg_common, out_side=-1, outside_below=True))
 
 gap = wt_ext[-1] + mut_ext[1] + track_gap_mm * MM
 y_wt = 0.0
@@ -861,14 +873,9 @@ def draw_track(track_y, df, plan):
             ax.add_patch(patches.Rectangle((sx, lo), w, hi - lo,
                                            facecolor=color_probe, edgecolor="none",
                                            zorder=Z_BOX))
-            if geo.get("label_outside"):
-                y_lab = (hi if side == 1 else lo) + side * 0.8 * MM
-                ax.text(sx + w / 2, y_lab, name, ha="center",
-                        va="bottom" if side == 1 else "top",
-                        fontsize=fs, color=text_color, zorder=Z_MARK)
-            else:
-                ax.text(sx + w / 2, (lo + hi) / 2, name, ha="center", va="center",
-                        fontsize=fs, color=text_color, zorder=Z_MARK)
+            # 박스 폭이나 트랙의 위/아래 위치와 관계없이 이름은 항상 박스 아래.
+            ax.text(sx + w / 2, lo - 0.8 * MM, name, ha="center", va="top",
+                    fontsize=fs, color=text_color, zorder=Z_MARK)
 
         elif kind in ("Exon", "Marker", "Promoter"):
             face = {"Exon": color_exon, "Marker": color_marker, "Promoter": color_promoter}[kind]
